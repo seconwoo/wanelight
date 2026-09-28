@@ -50,7 +50,7 @@
 
     <!-- Torch: everything dims except the circle around the pointer -->
     <rect x="0" y="0" width="800" height="450" fill="#000" mask="url(#torch)" opacity="0">
-      <animate attributeName="opacity" dur="10s" repeatCount="indefinite" values="0;0;0.78;0.78;0;0" keyTimes="0;0.1;0.14;0.9;0.94;1"/>
+      <animate attributeName="opacity" dur="10s" repeatCount="indefinite" values="0;0;0.9;0.9;0;0" keyTimes="0;0.1;0.14;0.9;0.94;1"/>
     </rect>
 
     <!-- Hotkey badge -->

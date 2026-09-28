@@ -16,7 +16,7 @@
     <rect x="6" y="376" width="788" height="24" fill="#1f242b"/>
     <!-- Away fade: gentle -->
     <rect x="6" y="6" width="788" height="394" fill="#000" opacity="0">
-      <animate attributeName="opacity" dur="9s" repeatCount="indefinite" values="0;0;0.7;0.7;0;0" keyTimes="0;0.33;0.61;0.69;0.7;1"/>
+      <animate attributeName="opacity" dur="9s" repeatCount="indefinite" values="0;0;0.86;0.86;0;0" keyTimes="0;0.33;0.61;0.69;0.7;1"/>
     </rect>
     <!-- Idle clock -->
     <g font-size="15" fill="#f5c06a" font-weight="600">

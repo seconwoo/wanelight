@@ -12,7 +12,7 @@ can notice and release within a fraction of a second.
 ## See it
 
 The animations below are illustrations: the real overlay is excluded from screen capture, so it
-can't be recorded. Dimming is exaggerated slightly so it reads at thumbnail size.
+can't be recorded. Dimming is exaggerated so it reads clearly at thumbnail size.
 
 ### Torch mode, spotlight style
 
