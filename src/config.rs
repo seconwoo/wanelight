@@ -24,6 +24,7 @@ pub struct Config {
     pub static_dimming: StaticDimming,
     pub chrome: Chrome,
     pub torch: Torch,
+    pub blacks: Blacks,
     pub away: Away,
     pub ddc: Ddc,
     pub refresh: Refresh,
@@ -97,6 +98,18 @@ pub struct Torch {
     pub hotkey: String,
 }
 
+/// Near-black grays become true black, through a full-screen color matrix
+/// (the same mechanism as Windows' Color filters).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Blacks {
+    pub enabled: bool,
+    /// Grays at or below this level (0..1, as in #RRGGBB) become black.
+    pub level: f32,
+    /// Toggle hotkey. Empty disables it.
+    pub hotkey: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Away {
@@ -160,6 +173,7 @@ impl Default for Config {
             static_dimming: StaticDimming::default(),
             chrome: Chrome::default(),
             torch: Torch::default(),
+            blacks: Blacks::default(),
             away: Away::default(),
             ddc: Ddc::default(),
             refresh: Refresh::default(),
@@ -201,6 +215,12 @@ impl Default for Torch {
             spotlight_radius_px: 400,
             hotkey: "Ctrl+Alt+Shift+T".into(),
         }
+    }
+}
+
+impl Default for Blacks {
+    fn default() -> Self {
+        Self { enabled: false, level: 0.15, hotkey: String::new() }
     }
 }
 
@@ -294,6 +314,7 @@ impl Config {
         let t = &mut self.torch;
         t.dim = t.dim.clamp(0.0, 0.95);
         t.spotlight_radius_px = t.spotlight_radius_px.clamp(50, 3000);
+        self.blacks.level = self.blacks.level.clamp(0.0, 0.35);
         let a = &mut self.away;
         a.dim_amount = a.dim_amount.clamp(0.0, 0.95);
         a.fade_secs = a.fade_secs.clamp(1.0, 600.0);

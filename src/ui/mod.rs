@@ -290,7 +290,7 @@ impl App {
 
     fn focus(&mut self, ui: &mut egui::Ui) {
         ui.heading("Focus modes");
-        ui.label("Stronger, visible protection for people who live in one app all day. Both are off until you turn them on.");
+        ui.label("Stronger, visible protection for people who live in one app all day. All are off until you turn them on.");
 
         let c = &mut self.cfg.chrome;
         section(
@@ -347,6 +347,25 @@ impl App {
                 );
             }
         });
+
+        let b = &mut self.cfg.blacks;
+        section(
+            ui,
+            "Deeper blacks",
+            "Near-black grays in every app become true black, so those OLED pixels switch off. Whites stay as they are. Also in the tray menu.",
+        );
+        ui.checkbox(&mut b.enabled, "Deeper blacks");
+        ui.add_enabled_ui(b.enabled, |ui| {
+            ui.add(slider(&mut b.level, 0.0..=0.35).text("Black up to").custom_formatter(|v, _| {
+                let g = (v * 255.0).round() as u8;
+                format!("#{g:02X}{g:02X}{g:02X}")
+            }));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Hotkey");
+            ui.add(egui::TextEdit::singleline(&mut b.hotkey).hint_text("none, e.g. Ctrl+Alt+Shift+B").desired_width(200.0));
+        });
+        ui.label(RichText::new("Doesn't work while Windows Magnifier or colour filters are on.").weak());
     }
 
     fn away(&mut self, ui: &mut egui::Ui) {
@@ -390,7 +409,7 @@ impl App {
 
     fn apps(&mut self, ui: &mut egui::Ui) {
         ui.heading("Apps");
-        section(ui, "Never dim while these are in front", "For apps where you want exact colours (photo or video editing).");
+        section(ui, "Never dim or recolour while these are in front", "For apps where you want exact colours (photo or video editing).");
         app_list(ui, "excluded", &mut self.cfg.apps.excluded, &mut self.new_excluded);
         ui.horizontal(|ui| {
             ui.label("Add common:");

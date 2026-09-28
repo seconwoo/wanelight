@@ -20,6 +20,7 @@ pub const ID_PAUSE: u32 = 103;
 pub const ID_RESUME: u32 = 104;
 pub const ID_EXIT: u32 = 105;
 pub const ID_TORCH: u32 = 106;
+pub const ID_BLACKS: u32 = 107;
 
 pub struct Tray {
     hwnd: HWND,
@@ -185,7 +186,7 @@ impl Drop for Tray {
 
 /// Shows the context menu and returns the chosen command id (0 = none).
 /// Must be called without holding any agent borrow: the menu runs a modal loop.
-pub fn show_menu(hwnd: HWND, status_line: &str, paused: bool, torch: bool) -> u32 {
+pub fn show_menu(hwnd: HWND, status_line: &str, paused: bool, torch: bool, blacks: bool) -> u32 {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return 0 };
         let status = crate::util::wide(status_line);
@@ -202,6 +203,8 @@ pub fn show_menu(hwnd: HWND, status_line: &str, paused: bool, torch: bool) -> u3
         }
         let torch_flags = if torch { MF_STRING | MF_CHECKED } else { MF_STRING };
         let _ = AppendMenuW(menu, torch_flags, ID_TORCH as usize, w!("Torch mode"));
+        let blacks_flags = if blacks { MF_STRING | MF_CHECKED } else { MF_STRING };
+        let _ = AppendMenuW(menu, blacks_flags, ID_BLACKS as usize, w!("Deeper blacks"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, ID_EXIT as usize, w!("Exit"));
         let _ = SetMenuDefaultItem(menu, ID_OPEN, 0);

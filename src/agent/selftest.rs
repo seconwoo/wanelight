@@ -12,6 +12,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
 
 use super::capture::{self, Cell, Sample};
+use super::color;
 use super::overlay::Overlay;
 use crate::util;
 
@@ -237,6 +238,34 @@ pub fn run(exclude_from_capture: bool, map_only: bool) -> i32 {
         }
     }
     say(format!("overlay first show: {show_ms:.1} ms"));
+    ov.hide();
+    pump(300);
+
+    // Color matrix: does duplication see it? Briefly scales the screen to 70 %.
+    let plain = next_frame(d, 12).map(|c| region_mean(&c, gw, region)).or(white);
+    match color::ColorEffect::new() {
+        None => say("color effect: FAILED (MagInitialize)".into()),
+        Some(mut fx) => {
+            let mut m = color::IDENTITY;
+            for i in 0..3 {
+                m[i * 5 + i] = 0.7;
+            }
+            let set = fx.set(&m);
+            pump(700);
+            let seen = next_frame(d, 12).map(|c| region_mean(&c, gw, region));
+            drop(fx);
+            pump(300);
+            match (set, plain, seen) {
+                (false, ..) => say("color effect: FAILED (MagSetFullscreenColorEffect)".into()),
+                (_, None, _) => say("color effect vs capture: inconclusive (no frame with the test surface)".into()),
+                (_, Some(w), None) => say(format!("color effect vs capture: not captured (surface {w:.3}, no new frame)")),
+                (_, Some(w), Some(c)) => {
+                    let verdict = if c < w * 0.9 { "ok (capture sees what the panel shows)" } else { "not captured" };
+                    say(format!("color effect vs capture: {verdict}; test surface brightness {w:.3} -> {c:.3}"));
+                }
+            }
+        }
+    }
     unsafe {
         let _ = DestroyWindow(surface);
     }

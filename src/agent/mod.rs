@@ -3,6 +3,7 @@
 //! a 30 Hz loop only while something is animating or the screen is resting.
 
 mod capture;
+mod color;
 mod ddc;
 mod model;
 mod overlay;
@@ -48,6 +49,7 @@ const WM_APP_PANEL: u32 = WM_APP + 3;
 const PANEL_HALO_PX: f32 = 90.0;
 const HOTKEY_ID: i32 = 1;
 const HOTKEY_TORCH: i32 = 2;
+const HOTKEY_BLACKS: i32 = 3;
 /// Frame interval while animating (~60 fps).
 const FAST_MS: u32 = 16;
 /// Frame interval while only watching the pointer or input (~30 fps).
@@ -143,6 +145,15 @@ struct Agent {
     chrome_revealed: [bool; 4],
     torch_active: bool,
     panel: PanelTracker,
+    color: ColorState,
+}
+
+/// Full-screen color matrix for deeper blacks.
+struct ColorState {
+    fx: Option<color::ColorEffect>,
+    failed: bool,
+    fader: color::Fader,
+    target: color::Matrix,
 }
 
 /// Panel torch mode: what is lit and how we learn about it.
@@ -230,6 +241,7 @@ impl Agent {
             chrome_revealed: [false; 4],
             torch_active: false,
             panel: PanelTracker::default(),
+            color: ColorState { fx: None, failed: false, fader: color::Fader::default(), target: color::IDENTITY },
         };
         a.rebuild();
         a.register_hotkey();
@@ -305,7 +317,11 @@ impl Agent {
     }
 
     fn register_hotkey(&mut self) {
-        for (id, text) in [(HOTKEY_ID, self.cfg.hotkey.clone()), (HOTKEY_TORCH, self.cfg.torch.hotkey.clone())] {
+        for (id, text) in [
+            (HOTKEY_ID, self.cfg.hotkey.clone()),
+            (HOTKEY_TORCH, self.cfg.torch.hotkey.clone()),
+            (HOTKEY_BLACKS, self.cfg.blacks.hotkey.clone()),
+        ] {
             unsafe {
                 let _ = UnregisterHotKey(Some(self.hwnd), id);
             }
@@ -329,7 +345,12 @@ impl Agent {
             return;
         }
         log!("config reloaded");
-        let hotkey_changed = new.hotkey != self.cfg.hotkey || new.torch.hotkey != self.cfg.torch.hotkey;
+        let hotkey_changed = new.hotkey != self.cfg.hotkey
+            || new.torch.hotkey != self.cfg.torch.hotkey
+            || new.blacks.hotkey != self.cfg.blacks.hotkey;
+        if new.blacks.enabled != self.cfg.blacks.enabled {
+            self.color.failed = false;
+        }
         self.cfg = new;
         if hotkey_changed {
             self.register_hotkey();
@@ -575,6 +596,36 @@ impl Agent {
             model::targets(&s.model, &ctx, &mut s.target, &mut s.motion);
         }
         self.interactive = interactive;
+        self.color.target = if self.cfg.blacks.enabled && !blocked {
+            color::crush(color::srgb_to_linear(self.cfg.blacks.level))
+        } else {
+            color::IDENTITY
+        };
+    }
+
+
+    /// Steps the color matrix; holds the Magnification API only while it isn't identity.
+    fn animate_color(&mut self, dt: f32) -> bool {
+        let (m, moving) = self.color.fader.step(&self.color.target, dt);
+        if m == color::IDENTITY && !moving {
+            self.color.fx = None;
+            return false;
+        }
+        if self.color.fx.is_none() && !self.color.failed {
+            self.color.fx = color::ColorEffect::new();
+            if self.color.fx.is_none() {
+                log!("color: Magnification API unavailable");
+                self.color.failed = true;
+            }
+        }
+        if let Some(fx) = &mut self.color.fx
+            && !fx.set(&m)
+        {
+            log!("color: setting the color effect failed (Magnifier or Color filters in use?)");
+            self.color.fx = None;
+            self.color.failed = true;
+        }
+        moving && !self.color.failed
     }
 
     fn update_away(&mut self, now: f64, idle: f64) {
@@ -643,6 +694,7 @@ impl Agent {
         // Time constants: ~95 % of the way after 3 tau.
         let easing = model::Easing { release: 0.06, chrome_in: self.cfg.chrome.fade_secs / 3.0, torch_in: 0.12 };
         let mut animating = self.away_cur < self.away_target;
+        animating |= self.animate_color(dt);
         for s in &mut self.screens {
             let (changed, easing_now) = model::ramp(&mut s.cur, &s.target, &s.motion, dt, up, &easing);
             animating |= easing_now;
@@ -941,6 +993,20 @@ impl Agent {
         self.update_tray(now);
     }
 
+    fn toggle_blacks(&mut self) {
+        self.cfg.blacks.enabled = !self.cfg.blacks.enabled;
+        self.color.failed = false;
+        log!("deeper blacks {}", if self.cfg.blacks.enabled { "on" } else { "off" });
+        if let Err(e) = self.cfg.save() {
+            log!("config: save failed: {e}");
+        }
+        self.cfg_mtime = Config::modified();
+        let now = util::now();
+        self.compute_targets(now);
+        self.kick_animation();
+        self.update_tray(now);
+    }
+
     fn state_label(&self, now: f64) -> String {
         if !self.cfg.enabled {
             return "Protection is off".into();
@@ -960,7 +1026,8 @@ impl Agent {
         }
         let n = self.screens.iter().filter(|s| s.enabled).count();
         let torch = if self.cfg.torch.enabled { " · torch mode" } else { "" };
-        format!("Protecting {} display{}{torch}", n, if n == 1 { "" } else { "s" })
+        let blacks = if self.cfg.blacks.enabled { " · deeper blacks" } else { "" };
+        format!("Protecting {} display{}{torch}{blacks}", n, if n == 1 { "" } else { "s" })
     }
 
     fn update_tray(&mut self, now: f64) {
@@ -977,6 +1044,7 @@ impl Agent {
             tray::ID_PAUSE => self.pause(None),
             tray::ID_RESUME => self.resume(),
             tray::ID_TORCH => self.toggle_torch(),
+            tray::ID_BLACKS => self.toggle_blacks(),
             tray::ID_EXIT => unsafe {
                 let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
             },
@@ -1063,6 +1131,7 @@ impl Agent {
         for s in &mut self.screens {
             s.overlay = None;
         }
+        self.color.fx = None;
         ddc::restore_now();
         self.tray.remove();
     }
@@ -1251,10 +1320,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     WM_LBUTTONUP => crate::ui::launch("overview"),
                     WM_RBUTTONUP | WM_CONTEXTMENU => {
                         let now = util::now();
-                        let info = with_agent(|a| (a.state_label(now), a.is_paused(now), a.cfg.torch.enabled));
-                        let (line, paused, torch) = info.unwrap_or_default();
+                        let info = with_agent(|a| {
+                            (a.state_label(now), a.is_paused(now), a.cfg.torch.enabled, a.cfg.blacks.enabled)
+                        });
+                        let (line, paused, torch, blacks) = info.unwrap_or_default();
                         // No borrow is held here: the menu runs a nested message loop.
-                        let cmd = tray::show_menu(hwnd, &line, paused, torch);
+                        let cmd = tray::show_menu(hwnd, &line, paused, torch, blacks);
                         if cmd != 0 {
                             with_agent(|a| a.on_menu(cmd));
                         }
@@ -1266,6 +1337,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_HOTKEY => {
                 if wp.0 as i32 == HOTKEY_TORCH {
                     with_agent(|a| a.toggle_torch());
+                } else if wp.0 as i32 == HOTKEY_BLACKS {
+                    with_agent(|a| a.toggle_blacks());
                 } else {
                     with_agent(|a| a.toggle_pause());
                 }
