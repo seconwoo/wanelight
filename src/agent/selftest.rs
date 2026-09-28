@@ -80,6 +80,18 @@ fn white_window(x: i32, y: i32, size: i32) -> Option<HWND> {
     }
 }
 
+/// (Windows reports a fullscreen app, the taskbar is topmost).
+fn fullscreen_state() -> (bool, bool) {
+    use windows::Win32::UI::Shell::{QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
+    unsafe {
+        let busy = matches!(SHQueryUserNotificationState(), Ok(s) if s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN);
+        let topmost = FindWindowW(w!("Shell_TrayWnd"), windows::core::PCWSTR::null())
+            .map(|h| GetWindowLongPtrW(h, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0)
+            .unwrap_or(true);
+        (busy, topmost)
+    }
+}
+
 fn next_frame(d: &mut super::capture::Display, tries: usize) -> Option<Vec<Cell>> {
     for _ in 0..tries {
         if let Sample::Frame { cells, .. } = d.sample(util::now()) {
@@ -228,6 +240,20 @@ pub fn run(exclude_from_capture: bool, map_only: bool) -> i32 {
     unsafe {
         let _ = DestroyWindow(surface);
     }
+
+    // Fullscreen check: an overlay spanning the screen (here at an invisible
+    // 0.4 %) must not make Windows think a fullscreen app is running, or the
+    // auto-hide taskbar stops appearing.
+    let before = fullscreen_state();
+    let _ = ov.show(&vec![1.0 / 255.0; gw * gh]);
+    pump(800);
+    let during = fullscreen_state();
+    let verdict = match (before, during) {
+        ((true, _), _) => "inconclusive (a fullscreen app was already running)".to_string(),
+        (_, (false, true)) => "ok (taskbar stays on top, no fullscreen app reported)".to_string(),
+        (_, (busy, topmost)) => format!("PROBLEM (fullscreen app reported: {busy}, taskbar on top: {topmost})"),
+    };
+    say(format!("full-screen overlay vs taskbar: {verdict}"));
     ov.hide();
     drop(ov);
     pump(100);

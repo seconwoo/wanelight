@@ -6,6 +6,10 @@
 //! dimmed cells and is hidden entirely when nothing is dimmed, so fullscreen
 //! apps elsewhere keep direct scan-out. It is excluded from screen capture, so
 //! our own sampling (and the user's screenshots) never see it.
+//!
+//! The window never covers the whole monitor: Windows treats any visible
+//! topmost window that does as a fullscreen app, which stops the auto-hide
+//! taskbar from appearing and can switch on "do not disturb".
 
 use std::sync::Once;
 
@@ -23,6 +27,8 @@ use super::capture::{CELL, GridGeom, Gpu};
 use crate::log;
 
 const CLASS: windows::core::PCWSTR = w!("WanelightOverlay");
+/// Pixel rows left uncovered at the bottom of the monitor.
+const EDGE_GAP: i32 = 1;
 
 unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
@@ -77,10 +83,11 @@ impl Overlay {
                 CLASS,
                 w!(""),
                 WS_POPUP,
+                // Sized properly on first show; never monitor-sized (see module docs).
                 mon.left,
                 mon.top,
-                mon.right - mon.left,
-                mon.bottom - mon.top,
+                1,
+                1,
                 None,
                 None,
                 Some(hinst.into()),
@@ -167,8 +174,14 @@ impl Overlay {
                 left: cell_x(x0 as isize - 1).max(self.mon.left),
                 top: cell_y(y0 as isize - 1).max(self.mon.top),
                 right: cell_x(x1 as isize + 2).min(self.mon.right),
-                bottom: cell_y(y1 as isize + 2).min(self.mon.bottom),
+                // Stay one row short of the bottom edge: a monitor-sized window
+                // counts as a fullscreen app, and the auto-hide taskbar watches this row.
+                bottom: cell_y(y1 as isize + 2).min(self.mon.bottom - EDGE_GAP),
             };
+            if rect.bottom <= rect.top || rect.right <= rect.left {
+                self.hide();
+                return Ok(());
+            }
             if rect != self.win_rect || !self.visible {
                 let m = Matrix3x2 {
                     M11: CELL as f32,
