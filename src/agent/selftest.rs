@@ -309,3 +309,95 @@ pub fn run(exclude_from_capture: bool, map_only: bool) -> i32 {
     say("self-test finished".into());
     0
 }
+
+/// `wanelight --panel-probe`: prints the UI Automation container chains at
+/// sample points of the foreground window (without moving the pointer) and
+/// around the keyboard focus. Geometry and roles only.
+pub fn panel_probe(brief: bool) -> i32 {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+    use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+
+    use super::panels::{self, Node, Uia};
+
+    util::attach_console();
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+    let uia = match Uia::new() {
+        Ok(u) => u,
+        Err(e) => {
+            println!("UI Automation unavailable: {}", e.message());
+            return 1;
+        }
+    };
+    let fg = unsafe { GetForegroundWindow() };
+    let mut win = RECT::default();
+    unsafe {
+        let _ = DwmGetWindowAttribute(fg, DWMWA_EXTENDED_FRAME_BOUNDS, &mut win as *mut RECT as _, std::mem::size_of::<RECT>() as u32);
+    }
+    let wa = panels::area(&win).max(1.0);
+    println!("foreground window {}x{} at ({},{})", win.right - win.left, win.bottom - win.top, win.left, win.top);
+    let show = |label: &str, chain: &[Node]| {
+        println!("{label}");
+        for (i, n) in chain.iter().enumerate() {
+            let frac = panels::area(&n.rect) / wa;
+            if frac < 0.004 && i > 0 {
+                continue;
+            }
+            println!(
+                "  d{:<2} {:<8} {:<10} {:<14} {:>5}x{:<5} at ({:>5},{:>5})  {:>5.1}%",
+                i,
+                panels::control_type_name(n.control_type),
+                panels::landmark_name(n.landmark),
+                n.aria_role,
+                n.rect.right - n.rect.left,
+                n.rect.bottom - n.rect.top,
+                n.rect.left,
+                n.rect.top,
+                frac * 100.0
+            );
+        }
+    };
+    let (w, h) = ((win.right - win.left) as f32, (win.bottom - win.top) as f32);
+    let fmt_rect = |r: Option<RECT>| match r {
+        Some(r) => format!("{}x{} at ({},{})  {:.1}% of window", r.right - r.left, r.bottom - r.top, r.left, r.top, panels::area(&r) / wa * 100.0),
+        None => "none (whole window)".to_string(),
+    };
+    let mut points = Vec::new();
+    for fx in [0.06, 0.15, 0.3, 0.5, 0.7, 0.85, 0.95] {
+        points.push((fx, 0.5));
+    }
+    for fx in [0.3, 0.5, 0.7] {
+        points.push((fx, 0.93));
+    }
+    points.push((0.5, 0.04));
+    for (fx, fy) in points {
+        let pt = POINT { x: win.left + (w * fx) as i32, y: win.top + (h * fy) as i32 };
+        let t = Instant::now();
+        match uia.chain_at(pt) {
+            Ok(c) => {
+                if !brief {
+                    show(
+                        &format!("point {:.0}%,{:.0}% of window ({} levels, {:.0} ms):", fx * 100.0, fy * 100.0, c.len(), t.elapsed().as_secs_f64() * 1000.0),
+                        &c,
+                    );
+                }
+                println!("  point {:>3.0}%,{:>3.0}% -> panel {}", fx * 100.0, fy * 100.0, fmt_rect(panels::choose_panel(&c, &win)));
+            }
+            Err(e) => println!("point {:.0}%,{:.0}%: {}", fx * 100.0, fy * 100.0, e.message()),
+        }
+    }
+    let t = Instant::now();
+    match uia.focused_chain() {
+        Ok(c) => {
+            if !brief {
+                show(&format!("keyboard focus ({} levels, {:.0} ms):", c.len(), t.elapsed().as_secs_f64() * 1000.0), &c);
+            }
+            println!("  keyboard focus -> input {}", fmt_rect(panels::choose_input(&c, &win)));
+        }
+        Err(e) => println!("keyboard focus: {}", e.message()),
+    }
+    0
+}

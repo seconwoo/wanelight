@@ -22,6 +22,8 @@ pub struct Config {
     /// frame of latency on some GPUs.
     pub dim_fullscreen_apps: bool,
     pub static_dimming: StaticDimming,
+    pub chrome: Chrome,
+    pub torch: Torch,
     pub away: Away,
     pub ddc: Ddc,
     pub refresh: Refresh,
@@ -50,6 +52,49 @@ pub struct StaticDimming {
     pub fade_in_percent_per_minute: f32,
     /// Areas whose brightest pixel is below this (0..1 of SDR white) are left alone.
     pub min_brightness: f32,
+}
+
+/// Hard-dims the static edges (toolbars, tab strips, sidebars, status bars)
+/// of a maximized or fullscreen foreground window; they light up again when
+/// the cursor approaches or Alt is held.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Chrome {
+    pub enabled: bool,
+    pub max_dim: f32,
+    /// Seconds an edge area must stay unchanged before it dims.
+    pub after_secs: u32,
+    /// Cursor distance (px) at which a dimmed band lights up.
+    pub reveal_px: u32,
+    /// Seconds a band stays lit after the cursor leaves.
+    pub hold_secs: f32,
+    /// Roughly how long dimming takes to settle, in seconds.
+    pub fade_secs: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TorchMode {
+    /// The window you're using plus a small halo around the cursor stay lit.
+    Window,
+    /// Only a circle around the cursor stays lit.
+    Spotlight,
+    /// Only the app panel under the pointer (sidebar, main area, side pane)
+    /// stays lit, or the text box you are typing in. Uses UI Automation.
+    Panel,
+}
+
+/// Aggressive mode: everything except the focus area is dimmed.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Torch {
+    pub enabled: bool,
+    pub mode: TorchMode,
+    pub dim: f32,
+    /// Lit radius around the cursor in spotlight mode (px).
+    pub spotlight_radius_px: u32,
+    /// Toggle hotkey. Empty disables it.
+    pub hotkey: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -113,6 +158,8 @@ impl Default for Config {
             hotkey: "Ctrl+Alt+Shift+W".into(),
             dim_fullscreen_apps: true,
             static_dimming: StaticDimming::default(),
+            chrome: Chrome::default(),
+            torch: Torch::default(),
             away: Away::default(),
             ddc: Ddc::default(),
             refresh: Refresh::default(),
@@ -135,6 +182,24 @@ impl Default for StaticDimming {
             high_risk_app_dim: 0.35,
             fade_in_percent_per_minute: 20.0,
             min_brightness: 0.12,
+        }
+    }
+}
+
+impl Default for Chrome {
+    fn default() -> Self {
+        Self { enabled: false, max_dim: 0.5, after_secs: 60, reveal_px: 100, hold_secs: 3.0, fade_secs: 2.0 }
+    }
+}
+
+impl Default for Torch {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: TorchMode::Window,
+            dim: 0.6,
+            spotlight_radius_px: 400,
+            hotkey: "Ctrl+Alt+Shift+T".into(),
         }
     }
 }
@@ -220,6 +285,15 @@ impl Config {
         s.background_after_secs = s.background_after_secs.max(10);
         s.foreground_after_secs = s.foreground_after_secs.max(10);
         s.neglected_after_secs = s.neglected_after_secs.max(10);
+        let c = &mut self.chrome;
+        c.max_dim = c.max_dim.clamp(0.0, 0.9);
+        c.after_secs = c.after_secs.max(5);
+        c.reveal_px = c.reveal_px.clamp(0, 1000);
+        c.hold_secs = c.hold_secs.clamp(0.0, 60.0);
+        c.fade_secs = c.fade_secs.clamp(0.2, 30.0);
+        let t = &mut self.torch;
+        t.dim = t.dim.clamp(0.0, 0.95);
+        t.spotlight_radius_px = t.spotlight_radius_px.clamp(50, 3000);
         let a = &mut self.away;
         a.dim_amount = a.dim_amount.clamp(0.0, 0.95);
         a.fade_secs = a.fade_secs.clamp(1.0, 600.0);

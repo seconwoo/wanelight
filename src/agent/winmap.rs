@@ -129,16 +129,22 @@ fn ceil_div(a: i32, b: i32) -> i32 {
 
 /// Returns, for each cell of the monitor grid, the index into `snap.wins` of
 /// the window visible at the cell's centre (or OWNER_NONE for the desktop).
+/// Cells whose centres lie inside `r`, as [x0, x1) x [y0, y1) (clipped to the grid).
+pub fn cell_range(r: &RECT, mon: &RECT, geom: &GridGeom) -> (usize, usize, usize, usize) {
+    let base_x = mon.left + geom.ox + CELL / 2;
+    let base_y = mon.top + geom.oy + CELL / 2;
+    let x0 = ceil_div(r.left - base_x, CELL).max(0) as usize;
+    let x1 = (ceil_div(r.right - base_x, CELL).max(0) as usize).min(geom.gw);
+    let y0 = ceil_div(r.top - base_y, CELL).max(0) as usize;
+    let y1 = (ceil_div(r.bottom - base_y, CELL).max(0) as usize).min(geom.gh);
+    (x0.min(x1), y0.min(y1), x1, y1)
+}
+
 pub fn paint(snap: &Snapshot, mon: &RECT, geom: &GridGeom, out: &mut Vec<u16>) {
     out.clear();
     out.resize(geom.len(), OWNER_NONE);
-    let base_x = mon.left + geom.ox + CELL / 2;
-    let base_y = mon.top + geom.oy + CELL / 2;
     for (idx, w) in snap.wins.iter().enumerate().rev() {
-        let cx0 = ceil_div(w.rect.left - base_x, CELL).max(0) as usize;
-        let cx1 = (ceil_div(w.rect.right - base_x, CELL).max(0) as usize).min(geom.gw);
-        let cy0 = ceil_div(w.rect.top - base_y, CELL).max(0) as usize;
-        let cy1 = (ceil_div(w.rect.bottom - base_y, CELL).max(0) as usize).min(geom.gh);
+        let (cx0, cy0, cx1, cy1) = cell_range(&w.rect, mon, geom);
         if cx0 >= cx1 || cy0 >= cy1 || idx >= OWNER_NONE as usize {
             continue;
         }

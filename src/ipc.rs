@@ -10,7 +10,11 @@ use windows::core::PCWSTR;
 
 use crate::util;
 
-pub const AGENT_CLASS: &str = "WanelightAgentWindow";
+const AGENT_CLASS_BASE: &str = "WanelightAgentWindow";
+
+pub fn agent_class() -> String {
+    format!("{AGENT_CLASS_BASE}{}", util::instance_suffix())
+}
 pub const COMMAND_MESSAGE: &str = "Wanelight.Command.v1";
 
 pub const CMD_WRITE_STATUS: usize = 1;
@@ -29,7 +33,7 @@ pub fn command_message_id() -> u32 {
 
 /// Sends a command to a running agent. Returns false if no agent is running.
 pub fn send_command(cmd: usize, arg: isize) -> bool {
-    let class = util::wide(AGENT_CLASS);
+    let class = util::wide(&agent_class());
     unsafe {
         match FindWindowW(PCWSTR(class.as_ptr()), PCWSTR::null()) {
             Ok(hwnd) if !hwnd.is_invalid() => {

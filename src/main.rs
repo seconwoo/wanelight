@@ -17,6 +17,7 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("--ui") => ui::run(args.get(1).map(String::as_str).unwrap_or("overview")),
         Some("--selftest") => agent::selftest::run(exclude_from_capture, has("--map")),
+        Some("--panel-probe") => agent::selftest::panel_probe(has("--brief")),
         Some("--test-surface") => agent::selftest::surface(args.get(1).and_then(|s| s.parse().ok()).unwrap_or(60)),
         Some("--status") => {
             util::attach_console();

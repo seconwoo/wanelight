@@ -12,7 +12,7 @@ use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SW_RESTORE, SetForegr
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
 use windows::core::{PCWSTR, w};
 
-use crate::config::Config;
+use crate::config::{Config, TorchMode};
 use crate::ipc::{self, Status};
 use crate::{autostart, hardening, icon_art, util};
 
@@ -34,17 +34,19 @@ enum Tab {
     Overview,
     Heatmap,
     Protection,
+    Focus,
     Away,
     Apps,
     Tweaks,
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [Tab::Overview, Tab::Heatmap, Tab::Protection, Tab::Away, Tab::Apps, Tab::Tweaks];
+    const ALL: [Tab; 7] = [Tab::Overview, Tab::Heatmap, Tab::Protection, Tab::Focus, Tab::Away, Tab::Apps, Tab::Tweaks];
     fn parse(s: &str) -> Tab {
         match s.trim() {
             "heatmap" => Tab::Heatmap,
             "protection" => Tab::Protection,
+            "focus" => Tab::Focus,
             "away" => Tab::Away,
             "apps" => Tab::Apps,
             "tweaks" => Tab::Tweaks,
@@ -56,6 +58,7 @@ impl Tab {
             Tab::Overview => "Overview",
             Tab::Heatmap => "Wear heatmap",
             Tab::Protection => "Static dimming",
+            Tab::Focus => "Focus modes",
             Tab::Away => "Away & power",
             Tab::Apps => "Apps",
             Tab::Tweaks => "Windows tweaks",
@@ -66,7 +69,7 @@ impl Tab {
 pub fn run(tab: &str) -> i32 {
     util::init_log("ui");
     unsafe {
-        let name = util::wide("Local\\Wanelight.UI");
+        let name = util::wide(&format!("Local\\Wanelight.UI{}", util::instance_suffix()));
         let _mutex = CreateMutexW(None, false, PCWSTR(name.as_ptr()));
         if GetLastError() == ERROR_ALREADY_EXISTS {
             let _ = std::fs::write(request_path(), tab);
@@ -285,6 +288,67 @@ impl App {
         ui.label(RichText::new("Turn off for competitive gaming: on some GPUs any overlay above a game adds a frame of latency.").weak());
     }
 
+    fn focus(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Focus modes");
+        ui.label("Stronger, visible protection for people who live in one app all day. Both are off until you turn them on.");
+
+        let c = &mut self.cfg.chrome;
+        section(
+            ui,
+            "Chrome hover-reveal",
+            "When a window fills the screen, its unchanging toolbars, tab strips, sidebars and status bar dim hard. Move the pointer toward one, or hold Alt, and it lights up at once.",
+        );
+        ui.checkbox(&mut c.enabled, "Dim the toolbars and sidebars of full-screen windows");
+        ui.add_enabled_ui(c.enabled, |ui| {
+            percent(ui, &mut c.max_dim, 0.1..=0.9, "Dim to");
+            ui.add(slider(&mut c.after_secs, 10..=600).text("After unchanged for").custom_formatter(|v, _| {
+                if v < 60.0 { format!("{v:.0} s") } else { format!("{:.1} min", v / 60.0) }
+            }));
+            ui.add(
+                slider(&mut c.reveal_px, 20..=400)
+                    .text("Light up when the pointer is within")
+                    .custom_formatter(|v, _| format!("{v:.0} px")),
+            );
+            ui.add(slider(&mut c.hold_secs, 0.5..=15.0).text("Stay lit for").custom_formatter(|v, _| format!("{v:.1} s")));
+            ui.add(slider(&mut c.fade_secs, 0.5..=10.0).text("Fade over").custom_formatter(|v, _| format!("{v:.1} s")));
+        });
+
+        let hotkey = self.cfg.torch.hotkey.clone();
+        let t = &mut self.cfg.torch;
+        let detail = if hotkey.is_empty() {
+            "Only what you're focused on stays lit; everything else dims. Also in the tray menu.".to_string()
+        } else {
+            format!("Only what you're focused on stays lit; everything else dims. Toggle anytime with {hotkey} or from the tray menu.")
+        };
+        section(ui, "Torch mode", &detail);
+        ui.checkbox(&mut t.enabled, "Torch mode");
+        ui.add_enabled_ui(t.enabled, |ui| {
+            ui.radio_value(&mut t.mode, TorchMode::Window, "Light the window I'm using, plus the area around the pointer");
+            ui.radio_value(&mut t.mode, TorchMode::Spotlight, "Light only a circle around the pointer");
+            ui.radio_value(&mut t.mode, TorchMode::Panel, "Light only the panel I'm pointing at, or the text box I'm typing in");
+            if t.mode == TorchMode::Panel {
+                ui.label(
+                    RichText::new(
+                        "Panels are found through Windows accessibility (UI Automation), reading layout only, never text. \
+                         Chromium and Electron apps turn on their accessibility support when asked, which costs them a \
+                         little extra work; VS Code may ask whether you use a screen reader. Apps that expose no layout \
+                         light up as a whole window.",
+                    )
+                    .weak(),
+                );
+            }
+            percent(ui, &mut t.dim, 0.2..=0.95, "Dim everything else by");
+            ui.label(RichText::new("While torch mode is on it replaces static and chrome dimming, so the lit area stays evenly bright.").weak());
+            if t.mode == TorchMode::Spotlight {
+                ui.add(
+                    slider(&mut t.spotlight_radius_px, 100..=1500)
+                        .text("Spotlight radius")
+                        .custom_formatter(|v, _| format!("{v:.0} px")),
+                );
+            }
+        });
+    }
+
     fn away(&mut self, ui: &mut egui::Ui) {
         ui.heading("Away & power");
         let a = &mut self.cfg.away;
@@ -482,6 +546,7 @@ impl eframe::App for App {
                 Tab::Overview => self.overview(ui),
                 Tab::Heatmap => self.heat.show(ui, self.agent_running),
                 Tab::Protection => self.protection(ui),
+                Tab::Focus => self.focus(ui),
                 Tab::Away => self.away(ui),
                 Tab::Apps => self.apps(ui),
                 Tab::Tweaks => self.tweaks(ui),

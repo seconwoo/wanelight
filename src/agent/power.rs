@@ -8,6 +8,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINF
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SC_MONITORPOWER, WM_SYSCOMMAND};
 use windows::Win32::System::SystemInformation::GetTickCount;
 
+/// Tick count of the last keyboard or mouse input (changes on any input).
+pub fn last_input_tick() -> u32 {
+    let mut lii = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    unsafe {
+        let _ = GetLastInputInfo(&mut lii);
+    }
+    lii.dwTime
+}
+
 /// Seconds since the last keyboard or mouse input anywhere in the session.
 pub fn idle_secs() -> f64 {
     let mut lii = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };

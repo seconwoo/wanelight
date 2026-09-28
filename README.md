@@ -14,6 +14,8 @@ can notice and release within a fraction of a second.
 | **Static dimming** | Samples each monitor about once a second (DXGI Desktop Duplication, reduced on the GPU to 16×16-pixel cells). Bright areas unchanged for 3 minutes fade down by up to 25% (taskbar, sidebars, logos, HUDs). The window you are using is protected: at most 10%, and only after 15 minutes. |
 | **Unattended monitors** | A second monitor that hasn't had the cursor or focus for 5 minutes gets stronger dimming of its static areas. |
 | **High-risk apps** | Chat, trading and monitoring apps (your list) get stronger dimming when they aren't in front. |
+| **Chrome hover-reveal** *(opt-in)* | When the window you're using fills the screen, its static edge bands (toolbars, tab strips, sidebars, status bar) dim to 50%. They light up again as the pointer comes within 100 px, or while Alt is held, and dim again 3 s after it leaves. Both directions use smooth eased fades. |
+| **Torch mode** *(opt-in)* | Only your focus stays lit, and everything else dims by 60%. What stays lit is one of: the window you're using plus a halo around the pointer; just a spotlight around the pointer; or the **panel** under the pointer (sidebar, main area, side pane). In panel mode, typing switches to lighting only the text box, found through UI Automation (layout only, never text). Toggle with **Ctrl+Alt+Shift+T** or from the tray. |
 | **Away** | No input *and* a still screen for 5 minutes fades the screen down; any input restores it instantly. After 20 minutes the displays are turned off, unless audio is playing. |
 | **DDC/CI brightness** | Optional (off by default): also lowers the monitor's own brightness while you're away. The original brightness is restored on exit, and after a crash on the next start. |
 | **Pixel-refresh helper** | Counts panel-on hours. After 4 hours it turns the display off at a quiet moment so the panel can run its compensation cycle. |
@@ -50,14 +52,15 @@ This starts the tray agent; running it again opens the settings window. Other fl
 
 | Flag | Purpose |
 |---|---|
-| `--ui [tab]` | Open the settings window (`overview`, `heatmap`, `protection`, `away`, `apps`, `tweaks`) |
+| `--ui [tab]` | Open the settings window (`overview`, `heatmap`, `protection`, `focus`, `away`, `apps`, `tweaks`) |
 | `--status` | Print the running agent's status as JSON |
 | `--quit` | Stop the running agent |
 | `--selftest` | Check capture, the GPU shader and capture exclusion (briefly dims a small square) |
 | `--selftest --map` | Read-only: print a map of which parts of the screen are changing |
 | `--test-surface [secs]` | Show a white test square to watch dimming happen |
+| `--panel-probe [--brief]` | Print the UI panels panel mode would pick in the foreground window (layout only) |
 
-Settings, logs and wear data live in `%APPDATA%\Wanelight`, or in `WANELIGHT_DATA_DIR` if that is set.
+Settings, logs and wear data live in `%APPDATA%\Wanelight`. Setting `WANELIGHT_DATA_DIR` uses another folder and runs an isolated instance next to the normal one, which is handy for testing.
 `config.toml` can be edited by hand; the agent reloads it within a second.
 
 ## Layout

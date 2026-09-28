@@ -30,6 +30,22 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
+/// Suffix that isolates instance-wide names (mutexes, window classes) when
+/// `WANELIGHT_DATA_DIR` points somewhere else, so a test copy can run beside
+/// the real one.
+pub fn instance_suffix() -> String {
+    match std::env::var_os("WANELIGHT_DATA_DIR") {
+        Some(d) => format!(".{:08x}", fnv1a(d.to_string_lossy().to_ascii_lowercase().as_bytes()) as u32),
+        None => String::new(),
+    }
+}
+
+/// Verbose diagnostics, enabled with `WANELIGHT_DEBUG=1`.
+pub fn debug_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WANELIGHT_DEBUG").is_some_and(|v| v != "0"))
+}
+
 /// Seconds since process start (monotonic).
 pub fn now() -> f64 {
     static START: OnceLock<Instant> = OnceLock::new();

@@ -6,6 +6,7 @@ mod capture;
 mod ddc;
 mod model;
 mod overlay;
+mod panels;
 mod power;
 pub mod selftest;
 mod tray;
@@ -26,11 +27,12 @@ use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::UI::Input::{RAWINPUTDEVICE, RIDEV_INPUTSINK, RIDEV_REMOVE, RegisterRawInputDevices};
 use windows::Win32::UI::Shell::{QUNS_PRESENTATION_MODE, SHQueryUserNotificationState};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
-use crate::config::{Config, MonitorPrefs};
+use crate::config::{Config, MonitorPrefs, TorchMode};
 use crate::ipc;
 use crate::ledger::Ledger;
 use crate::log;
@@ -40,9 +42,18 @@ use capture::Gpu;
 const TIMER_TICK: usize = 1;
 const TIMER_FAST: usize = 2;
 const WM_APP_FOCUS: u32 = WM_APP + 2;
+/// Posted by the panel worker when UI Automation answers are ready.
+const WM_APP_PANEL: u32 = WM_APP + 3;
+/// Halo around the pointer in panel mode (px).
+const PANEL_HALO_PX: f32 = 90.0;
 const HOTKEY_ID: i32 = 1;
-/// How fast dimming releases when content changes or focus moves (per second).
-const RELEASE_PER_SEC: f32 = 1.2;
+const HOTKEY_TORCH: i32 = 2;
+/// Frame interval while animating (~60 fps).
+const FAST_MS: u32 = 16;
+/// Frame interval while only watching the pointer or input (~30 fps).
+const WATCH_MS: u32 = 33;
+/// Halo kept lit around the cursor in torch "window" mode (px).
+const TORCH_HALO_PX: f32 = 200.0;
 
 pub struct Options {
     pub exclude_from_capture: bool,
@@ -66,6 +77,7 @@ struct Screen {
     model: model::Model,
     cur: Vec<f32>,
     target: Vec<f32>,
+    motion: Vec<model::Motion>,
     owners: Vec<u16>,
     composed: Vec<f32>,
     composed_away: f32,
@@ -114,12 +126,48 @@ struct Agent {
     display_on: bool,
     display_off_at: Option<f64>,
     panel_on_secs: f64,
-    fast_timer: bool,
+    /// Current frame-timer interval in ms (0 = off).
+    frame_ms: u32,
     rebuild_pending: bool,
     last_ledger_save: f64,
     last_state_save: f64,
     reminder_shown: bool,
     shut_down: bool,
+    /// Last time the cursor was near each chrome band (top, bottom, left, right).
+    chrome_reveal: [f64; 4],
+    /// Chrome or torch is active: follow the cursor at frame rate.
+    interactive: bool,
+    last_pointer: (i32, i32, bool),
+    /// Chrome bands of the current foreground window (px) and their lit state.
+    chrome_zones: Option<[RECT; 4]>,
+    chrome_revealed: [bool; 4],
+    torch_active: bool,
+    panel: PanelTracker,
+}
+
+/// Panel torch mode: what is lit and how we learn about it.
+#[derive(Default)]
+struct PanelTracker {
+    worker: Option<panels::PanelWorker>,
+    /// Raw keyboard input registered (only while panel mode is active).
+    keyboard_sink: bool,
+    /// A key event arrived since the last frame (content is never read).
+    key_pending: bool,
+    typing: bool,
+    last_input_tick: u32,
+    last_ptr: (i32, i32),
+    /// Panel under the pointer and input area around the focus (screen px).
+    mouse_rect: Option<RECT>,
+    focus_rect: Option<RECT>,
+    last_point_query: f64,
+    last_query_ptr: (i32, i32),
+    last_focus_query: f64,
+    retry_at: Option<f64>,
+    /// Retries left for an app that hasn't exposed its layout yet.
+    retries_left: u32,
+    /// Input without pointer movement or a key event yet (a click or scroll,
+    /// or a keystroke whose raw-input message hasn't arrived yet).
+    unexplained_input_at: Option<f64>,
 }
 
 impl Agent {
@@ -165,12 +213,19 @@ impl Agent {
             display_on: true,
             display_off_at: None,
             panel_on_secs,
-            fast_timer: false,
+            frame_ms: 0,
             rebuild_pending: false,
             last_ledger_save: now,
             last_state_save: now,
             reminder_shown: false,
             shut_down: false,
+            chrome_reveal: [f64::NEG_INFINITY; 4],
+            interactive: false,
+            last_pointer: (0, 0, false),
+            chrome_zones: None,
+            chrome_revealed: [false; 4],
+            torch_active: false,
+            panel: PanelTracker::default(),
         };
         a.rebuild();
         a.register_hotkey();
@@ -207,6 +262,7 @@ impl Agent {
                         model: model::Model::new(len, now),
                         cur: vec![0.0; len],
                         target: vec![0.0; len],
+                        motion: vec![model::Motion::default(); len],
                         owners: Vec::new(),
                         composed: vec![0.0; len],
                         composed_away: 0.0,
@@ -245,19 +301,21 @@ impl Agent {
     }
 
     fn register_hotkey(&mut self) {
-        unsafe {
-            let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_ID);
-        }
-        if self.cfg.hotkey.trim().is_empty() {
-            return;
-        }
-        match parse_hotkey(&self.cfg.hotkey) {
-            Some((mods, vk)) => {
-                if let Err(e) = unsafe { RegisterHotKey(Some(self.hwnd), HOTKEY_ID, mods | MOD_NOREPEAT, vk) } {
-                    log!("hotkey {} unavailable: {}", self.cfg.hotkey, e.message());
-                }
+        for (id, text) in [(HOTKEY_ID, self.cfg.hotkey.clone()), (HOTKEY_TORCH, self.cfg.torch.hotkey.clone())] {
+            unsafe {
+                let _ = UnregisterHotKey(Some(self.hwnd), id);
             }
-            None => log!("hotkey \"{}\" not understood", self.cfg.hotkey),
+            if text.trim().is_empty() {
+                continue;
+            }
+            match parse_hotkey(&text) {
+                Some((mods, vk)) => {
+                    if let Err(e) = unsafe { RegisterHotKey(Some(self.hwnd), id, mods | MOD_NOREPEAT, vk) } {
+                        log!("hotkey {} unavailable: {}", text, e.message());
+                    }
+                }
+                None => log!("hotkey \"{}\" not understood", text),
+            }
         }
     }
 
@@ -267,11 +325,12 @@ impl Agent {
             return;
         }
         log!("config reloaded");
-        let hotkey_changed = new.hotkey != self.cfg.hotkey;
+        let hotkey_changed = new.hotkey != self.cfg.hotkey || new.torch.hotkey != self.cfg.torch.hotkey;
         self.cfg = new;
         if hotkey_changed {
             self.register_hotkey();
         }
+        self.sync_panel_mode();
         if !self.cfg.ddc.enabled && self.ddc_dimmed {
             self.ddc.send(ddc::Cmd::Restore);
             self.ddc_dimmed = false;
@@ -312,6 +371,7 @@ impl Agent {
         self.presentation =
             matches!(unsafe { SHQueryUserNotificationState() }, Ok(s) if s == QUNS_PRESENTATION_MODE);
         self.update_attention(now);
+        self.sync_panel_mode();
 
         if self.display_on {
             for s in &mut self.screens {
@@ -325,7 +385,7 @@ impl Agent {
         self.compute_targets(now);
         let animating = self.animate();
         self.accumulate_ledgers(dt);
-        self.set_fast_timer(animating || self.needs_input_watch());
+        self.update_frame_timer(animating);
         for s in &self.screens {
             if let Some(o) = &s.overlay {
                 o.keep_on_top();
@@ -345,22 +405,48 @@ impl Agent {
         if self.needs_input_watch() && power::idle_secs() < 0.5 {
             self.release_away("input");
         }
+        if self.interactive {
+            // Cheap per-frame check; the full policy only reruns when something visible flips.
+            let now = util::now();
+            let (p, alt) = pointer();
+            let moved = (p.x, p.y, alt) != self.last_pointer;
+            let mut recompute = self.torch_active && moved;
+            if let Some(zones) = &self.chrome_zones {
+                let flags = reveal_flags(zones, p, alt, now, &mut self.chrome_reveal, &self.cfg.chrome);
+                recompute |= flags != self.chrome_revealed;
+            }
+            if self.panel_mode_active(now) {
+                recompute |= self.track_panel_input(now, p);
+            }
+            if recompute {
+                self.compute_targets(now);
+            }
+        }
         let animating = self.animate();
-        self.set_fast_timer(animating || self.needs_input_watch());
+        self.update_frame_timer(animating);
     }
 
     fn needs_input_watch(&self) -> bool {
         self.away_target > 0.0 || self.away_cur > 0.0 || self.ddc_dimmed
     }
 
-    fn set_fast_timer(&mut self, on: bool) {
-        if on == self.fast_timer {
+    /// Frame timer: ~60 fps while something animates, ~30 fps while only
+    /// watching the pointer or input, off otherwise.
+    fn update_frame_timer(&mut self, animating: bool) {
+        let ms = if animating {
+            FAST_MS
+        } else if self.needs_input_watch() || self.interactive {
+            WATCH_MS
+        } else {
+            0
+        };
+        if ms == self.frame_ms {
             return;
         }
-        self.fast_timer = on;
+        self.frame_ms = ms;
         unsafe {
-            if on {
-                SetTimer(Some(self.hwnd), TIMER_FAST, 33, None);
+            if ms > 0 {
+                SetTimer(Some(self.hwnd), TIMER_FAST, ms, None);
             } else {
                 let _ = KillTimer(Some(self.hwnd), TIMER_FAST);
             }
@@ -369,7 +455,7 @@ impl Agent {
 
     fn kick_animation(&mut self) {
         let animating = self.animate();
-        self.set_fast_timer(animating || self.needs_input_watch());
+        self.update_frame_timer(animating);
     }
 
     fn refresh_windows(&mut self, now: f64) {
@@ -410,25 +496,71 @@ impl Agent {
     fn compute_targets(&mut self, now: f64) {
         let paused = self.is_paused(now);
         let multi = self.screens.len() > 1;
+        let (cursor, alt) = pointer();
+        self.last_pointer = (cursor.x, cursor.y, alt);
+        let blocked = !self.cfg.enabled || paused || self.excluded_fg || self.presentation;
+        let mut interactive = false;
+        self.chrome_zones = None;
+        self.torch_active = false;
         for s in &mut self.screens {
-            let suspended = !self.cfg.enabled
-                || !s.enabled
-                || paused
-                || self.excluded_fg
-                || self.presentation
-                || (s.fullscreen && !self.cfg.dim_fullscreen_apps);
+            let suspended = blocked || !s.enabled || (s.fullscreen && !self.cfg.dim_fullscreen_apps);
             let neglected =
                 multi && now - s.last_attention >= self.cfg.static_dimming.neglected_after_secs as f64;
+            // Torch mode replaces chrome dimming while it is on.
+            let chrome = if suspended || !self.cfg.chrome.enabled || self.cfg.torch.enabled {
+                None
+            } else {
+                chrome_ctx(&self.cfg.chrome, &self.snap, s, cursor, alt, now, &mut self.chrome_reveal)
+            };
+            if let Some((ctx, zones)) = &chrome {
+                self.chrome_zones = Some(*zones);
+                self.chrome_revealed = ctx.revealed;
+            }
+            let chrome = chrome.map(|(ctx, _)| ctx);
+            let torch = if suspended || !self.cfg.torch.enabled {
+                None
+            } else {
+                let t = &self.cfg.torch;
+                let cell = capture::CELL as f32;
+                let to_cells = |x: i32, y: i32| {
+                    ((x - s.d.rect.left - s.d.geom.ox) as f32 / cell, (y - s.d.rect.top - s.d.geom.oy) as f32 / cell)
+                };
+                let (cx, cy) = to_cells(cursor.x, cursor.y);
+                let halo = |px: f32| Some((cx, cy, px / cell, px * 0.5 / cell));
+                let (lit_foreground, lit_rect, halo) = match t.mode {
+                    TorchMode::Window => (true, None, halo(TORCH_HALO_PX)),
+                    TorchMode::Spotlight => (false, None, halo(t.spotlight_radius_px as f32)),
+                    TorchMode::Panel => {
+                        let rect = if self.panel.typing { self.panel.focus_rect } else { self.panel.mouse_rect };
+                        let lit_rect = rect.map(|r| {
+                            // Half a cell of margin keeps the panel's own edge fully lit.
+                            let (x0, y0) = to_cells(r.left, r.top);
+                            let (x1, y1) = to_cells(r.right, r.bottom);
+                            [x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5]
+                        });
+                        let halo = if self.panel.typing { None } else { halo(PANEL_HALO_PX) };
+                        // Until an app answers (or if it can't), light its whole window.
+                        (rect.is_none(), lit_rect, halo)
+                    }
+                };
+                Some(model::TorchCtx { dim: t.dim, lit_foreground, lit_rect, halo })
+            };
+            self.torch_active |= torch.is_some();
+            interactive |= chrome.is_some() || torch.is_some();
             let ctx = model::PolicyCtx {
                 cfg: &self.cfg,
                 snap: &self.snap,
                 owners: &s.owners,
+                gw: s.d.geom.gw,
                 high_risk: &self.high_risk,
                 neglected,
                 suspended,
+                chrome,
+                torch,
             };
-            model::targets(&s.model, &ctx, &mut s.target);
+            model::targets(&s.model, &ctx, &mut s.target, &mut s.motion);
         }
+        self.interactive = interactive;
     }
 
     fn update_away(&mut self, now: f64, idle: f64) {
@@ -494,12 +626,14 @@ impl Agent {
             self.away_cur = self.away_target;
         }
         let up = self.cfg.static_dimming.fade_in_percent_per_minute / 6000.0;
+        // Time constants: ~95 % of the way after 3 tau.
+        let easing = model::Easing { release: 0.06, chrome_in: self.cfg.chrome.fade_secs / 3.0, torch_in: 0.12 };
         let mut animating = self.away_cur < self.away_target;
         for s in &mut self.screens {
-            let before = s.cur.clone();
-            animating |= model::ramp(&mut s.cur, &s.target, dt, up, RELEASE_PER_SEC);
+            let (changed, easing_now) = model::ramp(&mut s.cur, &s.target, &s.motion, dt, up, &easing);
+            animating |= easing_now;
             let away = if s.enabled { self.away_cur } else { 0.0 };
-            if before == s.cur && away == s.composed_away && s.composed.len() == s.cur.len() {
+            if !changed && away == s.composed_away && s.composed.len() == s.cur.len() {
                 continue;
             }
             s.composed_away = away;
@@ -602,6 +736,10 @@ impl Agent {
 
     fn on_focus_change(&mut self) {
         let now = util::now();
+        // Layout or focus moved: forget cached panel rects so they are looked up again.
+        self.panel.last_point_query = f64::NEG_INFINITY;
+        self.panel.last_focus_query = f64::NEG_INFINITY;
+        self.panel.focus_rect = None;
         self.refresh_windows(now);
         self.compute_targets(now);
         self.kick_animation();
@@ -626,8 +764,158 @@ impl Agent {
         self.update_tray(now);
     }
 
+    fn panel_mode_active(&self, now: f64) -> bool {
+        self.cfg.enabled
+            && self.cfg.torch.enabled
+            && self.cfg.torch.mode == TorchMode::Panel
+            && !self.is_paused(now)
+            && !self.excluded_fg
+            && !self.presentation
+    }
+
+    /// Starts/stops the UI Automation worker and the keyboard-activity sink.
+    fn sync_panel_mode(&mut self) {
+        let on = self.panel_mode_active(util::now());
+        if on && self.panel.worker.is_none() {
+            self.panel.worker = Some(panels::PanelWorker::start(self.hwnd.0 as isize, WM_APP_PANEL));
+        }
+        if on != self.panel.keyboard_sink {
+            let dev = RAWINPUTDEVICE {
+                usUsagePage: 0x01,
+                usUsage: 0x06,
+                dwFlags: if on { RIDEV_INPUTSINK } else { RIDEV_REMOVE },
+                hwndTarget: if on { self.hwnd } else { HWND::default() },
+            };
+            match unsafe { RegisterRawInputDevices(&[dev], std::mem::size_of::<RAWINPUTDEVICE>() as u32) } {
+                Ok(()) => self.panel.keyboard_sink = on,
+                Err(e) => log!("panels: keyboard activity sink: {}", e.message()),
+            }
+        }
+        if !on {
+            self.panel.typing = false;
+            self.panel.mouse_rect = None;
+            self.panel.focus_rect = None;
+        }
+    }
+
+    /// Follows pointer vs keyboard activity and asks for fresh panel rects.
+    /// Returns true when what should be lit changed.
+    fn track_panel_input(&mut self, now: f64, p: POINT) -> bool {
+        let pt = &mut self.panel;
+        let before = pt.typing;
+        let moved = (p.x - pt.last_ptr.0).abs() + (p.y - pt.last_ptr.1).abs() >= 3;
+        if moved {
+            pt.last_ptr = (p.x, p.y);
+        }
+        let tick = power::last_input_tick();
+        let other_input = tick != pt.last_input_tick;
+        pt.last_input_tick = tick;
+        if std::mem::take(&mut pt.key_pending) {
+            pt.typing = true;
+            pt.unexplained_input_at = None;
+            if now - pt.last_focus_query > 0.25 {
+                pt.retries_left = pt.retries_left.max(5);
+                pt.last_focus_query = now;
+                if let Some(w) = &pt.worker {
+                    w.ask(panels::Query::Focus);
+                }
+            }
+        } else if moved {
+            pt.typing = false;
+            pt.unexplained_input_at = None;
+        } else if other_input {
+            pt.unexplained_input_at.get_or_insert(now);
+        }
+        // Clicked or scrolled (no key followed within 50 ms): follow the pointer again.
+        if pt.unexplained_input_at.is_some_and(|t| now - t >= 0.05) {
+            pt.unexplained_input_at = None;
+            pt.typing = false;
+        }
+        if !pt.typing {
+            let inside = pt.mouse_rect.is_some_and(|r| p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom);
+            let new_spot = (p.x, p.y) != pt.last_query_ptr;
+            // Window events already trigger a fresh lookup; the slow refresh only catches
+            // layout changes inside an app (a pane opened or resized).
+            let due = (!inside && new_spot && now - pt.last_point_query > 0.04) || now - pt.last_point_query > 10.0;
+            if due {
+                if new_spot {
+                    pt.retries_left = 5;
+                }
+                pt.last_point_query = now;
+                pt.last_query_ptr = (p.x, p.y);
+                if let Some(w) = &pt.worker {
+                    w.ask(panels::Query::Point(p.x, p.y));
+                }
+            }
+        } else if now - pt.last_focus_query > 1.0 {
+            // The text box can grow as you type.
+            pt.last_focus_query = now;
+            if let Some(w) = &pt.worker {
+                w.ask(panels::Query::Focus);
+            }
+        }
+        if pt.retry_at.is_some_and(|t| now >= t) {
+            pt.retry_at = None;
+            pt.last_point_query = f64::NEG_INFINITY;
+            pt.last_focus_query = f64::NEG_INFINITY;
+        }
+        if pt.typing != before && util::debug_enabled() {
+            log!("panels: {}", if pt.typing { "typing" } else { "pointer" });
+        }
+        pt.typing != before
+    }
+
+    fn on_panel_answers(&mut self) {
+        let Some(w) = &self.panel.worker else { return };
+        let now = util::now();
+        let mut changed = false;
+        for a in w.take_answers() {
+            if util::debug_enabled() {
+                log!("panels: answer {:?} rect={:?} retry={}", a.query, a.rect.map(|r| (r.left, r.top, r.right, r.bottom)), a.retry);
+            }
+            if a.retry && self.panel.retries_left > 0 {
+                // The app may still be building its accessibility tree; ask again soon.
+                self.panel.retries_left -= 1;
+                self.panel.retry_at = Some(now + 0.4);
+            }
+            let slot = match a.query {
+                panels::Query::Point(..) => &mut self.panel.mouse_rect,
+                panels::Query::Focus => &mut self.panel.focus_rect,
+            };
+            if *slot != a.rect {
+                if util::debug_enabled() {
+                    let what = match a.query { panels::Query::Point(..) => "pointer panel", panels::Query::Focus => "input area" };
+                    match a.rect {
+                        Some(r) => log!("panels: {what} {}x{} at ({},{})", r.right - r.left, r.bottom - r.top, r.left, r.top),
+                        None => log!("panels: {what} unknown (whole window)"),
+                    }
+                }
+                *slot = a.rect;
+                changed = true;
+            }
+        }
+        if changed {
+            self.compute_targets(now);
+            self.kick_animation();
+        }
+    }
+
     fn toggle_pause(&mut self) {
         if self.is_paused(util::now()) { self.resume() } else { self.pause(None) }
+    }
+
+    fn toggle_torch(&mut self) {
+        self.cfg.torch.enabled = !self.cfg.torch.enabled;
+        log!("torch mode {}", if self.cfg.torch.enabled { "on" } else { "off" });
+        if let Err(e) = self.cfg.save() {
+            log!("config: save failed: {e}");
+        }
+        self.cfg_mtime = Config::modified();
+        self.sync_panel_mode();
+        let now = util::now();
+        self.compute_targets(now);
+        self.kick_animation();
+        self.update_tray(now);
     }
 
     fn state_label(&self, now: f64) -> String {
@@ -648,7 +936,8 @@ impl Agent {
             return "Resting the screen".into();
         }
         let n = self.screens.iter().filter(|s| s.enabled).count();
-        format!("Protecting {} display{}", n, if n == 1 { "" } else { "s" })
+        let torch = if self.cfg.torch.enabled { " · torch mode" } else { "" };
+        format!("Protecting {} display{}{torch}", n, if n == 1 { "" } else { "s" })
     }
 
     fn update_tray(&mut self, now: f64) {
@@ -664,6 +953,7 @@ impl Agent {
             tray::ID_PAUSE_HOUR => self.pause(Some(3600.0)),
             tray::ID_PAUSE => self.pause(None),
             tray::ID_RESUME => self.resume(),
+            tray::ID_TORCH => self.toggle_torch(),
             tray::ID_EXIT => unsafe {
                 let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
             },
@@ -731,6 +1021,12 @@ impl Agent {
         if let Ok(text) = serde_json::to_string_pretty(&st) {
             let _ = util::write_atomic(&ipc::status_path(), text.as_bytes());
         }
+        if util::debug_enabled() {
+            for s in &self.screens {
+                let path = util::data_dir().join(format!("mask-{}.bmp", s.d.id));
+                let _ = util::write_atomic(&path, &mask_bmp(&s.composed, s.d.geom.gw, s.d.geom.gh, 4));
+            }
+        }
     }
 
     fn shutdown(&mut self) {
@@ -747,6 +1043,116 @@ impl Agent {
         ddc::restore_now();
         self.tray.remove();
     }
+}
+
+/// Debug view of a dim mask as a 24-bit BMP: white = untouched, darker = dimmed.
+fn mask_bmp(alpha: &[f32], gw: usize, gh: usize, scale: usize) -> Vec<u8> {
+    let (w, h) = (gw * scale, gh * scale);
+    let row = (w * 3).div_ceil(4) * 4;
+    let size = 54 + row * h;
+    let mut out = Vec::with_capacity(size);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(size as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(w as i32).to_le_bytes());
+    out.extend_from_slice(&(h as i32).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&[0u8; 24]);
+    for y in (0..h).rev() {
+        let start = out.len();
+        for x in 0..w {
+            let a = alpha.get((y / scale) * gw + x / scale).copied().unwrap_or(0.0);
+            let v = ((1.0 - a.clamp(0.0, 1.0)) * 255.0) as u8;
+            out.extend_from_slice(&[v, v, v]);
+        }
+        out.resize(start + row, 0);
+    }
+    out
+}
+
+/// Cursor position (physical px) and whether Alt is held.
+fn pointer() -> (POINT, bool) {
+    let mut p = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut p);
+    }
+    // Test hook: pretend the pointer is elsewhere (debug runs only).
+    if util::debug_enabled() {
+        if let Some((x, y)) = std::env::var("WANELIGHT_DEBUG_POINTER").ok().and_then(|v| {
+            let (x, y) = v.split_once(',')?;
+            Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+        }) {
+            p = POINT { x, y };
+        }
+    }
+    let alt = unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } as u16 & 0x8000 != 0;
+    (p, alt)
+}
+
+fn distance_to_rect(p: POINT, r: &RECT) -> f32 {
+    let dx = (r.left - p.x).max(0).max(p.x - r.right) as f32;
+    let dy = (r.top - p.y).max(0).max(p.y - r.bottom) as f32;
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Edge bands of the foreground window if it (nearly) fills this monitor.
+/// Updates `reveal` with the time the cursor was last near each band.
+fn chrome_ctx(
+    c: &crate::config::Chrome,
+    snap: &winmap::Snapshot,
+    s: &Screen,
+    cursor: POINT,
+    alt: bool,
+    now: f64,
+    reveal: &mut [f64; 4],
+) -> Option<(model::ChromeCtx, [RECT; 4])> {
+    let r = snap.fg_rect?;
+    let m = s.d.rect;
+    let ix = RECT { left: r.left.max(m.left), top: r.top.max(m.top), right: r.right.min(m.right), bottom: r.bottom.min(m.bottom) };
+    let area = |r: &RECT| (r.right - r.left).max(0) as f64 * (r.bottom - r.top).max(0) as f64;
+    if area(&ix) < 0.9 * area(&m) {
+        return None;
+    }
+    let (x0, y0, x1, y1) = winmap::cell_range(&ix, &m, &s.d.geom);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let (w, h) = ((x1 - x0) as f32, (y1 - y0) as f32);
+    let depth = [(h * 0.12).ceil() as usize, (h * 0.08).ceil() as usize, (w * 0.20).ceil() as usize, (w * 0.20).ceil() as usize];
+    let cell = capture::CELL;
+    let px = |cx: usize| m.left + s.d.geom.ox + cell * cx as i32;
+    let py = |cy: usize| m.top + s.d.geom.oy + cell * cy as i32;
+    let zones = [
+        RECT { left: px(x0), top: py(y0), right: px(x1), bottom: py(y0 + depth[0]) },
+        RECT { left: px(x0), top: py(y1 - depth[1]), right: px(x1), bottom: py(y1) },
+        RECT { left: px(x0), top: py(y0), right: px(x0 + depth[2]), bottom: py(y1) },
+        RECT { left: px(x1 - depth[3]), top: py(y0), right: px(x1), bottom: py(y1) },
+    ];
+    let revealed = reveal_flags(&zones, cursor, alt, now, reveal, c);
+    let ctx = model::ChromeCtx { rect: (x0, y0, x1, y1), depth, revealed, dim: c.max_dim, after_secs: c.after_secs as f32 };
+    Some((ctx, zones))
+}
+
+/// Which chrome bands are lit: the cursor is near them, was recently, or Alt is held.
+fn reveal_flags(
+    zones: &[RECT; 4],
+    cursor: POINT,
+    alt: bool,
+    now: f64,
+    reveal: &mut [f64; 4],
+    c: &crate::config::Chrome,
+) -> [bool; 4] {
+    let mut revealed = [alt; 4];
+    for (z, zr) in zones.iter().enumerate() {
+        if distance_to_rect(cursor, zr) <= c.reveal_px as f32 {
+            reveal[z] = now;
+        }
+        revealed[z] |= now - reveal[z] < c.hold_secs as f64;
+    }
+    revealed
 }
 
 fn parse_hotkey(s: &str) -> Option<(HOT_KEY_MODIFIERS, u32)> {
@@ -822,10 +1228,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     WM_LBUTTONUP => crate::ui::launch("overview"),
                     WM_RBUTTONUP | WM_CONTEXTMENU => {
                         let now = util::now();
-                        let info = with_agent(|a| (a.state_label(now), a.is_paused(now)));
-                        let (line, paused) = info.unwrap_or_default();
+                        let info = with_agent(|a| (a.state_label(now), a.is_paused(now), a.cfg.torch.enabled));
+                        let (line, paused, torch) = info.unwrap_or_default();
                         // No borrow is held here: the menu runs a nested message loop.
-                        let cmd = tray::show_menu(hwnd, &line, paused);
+                        let cmd = tray::show_menu(hwnd, &line, paused, torch);
                         if cmd != 0 {
                             with_agent(|a| a.on_menu(cmd));
                         }
@@ -835,12 +1241,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_HOTKEY => {
-                with_agent(|a| a.toggle_pause());
+                if wp.0 as i32 == HOTKEY_TORCH {
+                    with_agent(|a| a.toggle_torch());
+                } else {
+                    with_agent(|a| a.toggle_pause());
+                }
                 LRESULT(0)
             }
             WM_APP_FOCUS => {
                 with_agent(|a| a.on_focus_change());
                 LRESULT(0)
+            }
+            WM_APP_PANEL => {
+                with_agent(|a| a.on_panel_answers());
+                LRESULT(0)
+            }
+            WM_INPUT => {
+                // Keyboard activity only; the key itself is never read.
+                with_agent(|a| a.panel.key_pending = true);
+                DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_DISPLAYCHANGE => {
                 log!("display configuration changed");
@@ -901,7 +1320,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 pub fn run(opts: Options) -> i32 {
     util::init_log("agent");
     unsafe {
-        let name = wide("Local\\Wanelight.Agent");
+        let name = wide(&format!("Local\\Wanelight.Agent{}", util::instance_suffix()));
         let _mutex = CreateMutexW(None, false, PCWSTR(name.as_ptr()));
         if GetLastError() == ERROR_ALREADY_EXISTS {
             // Already running: a second launch opens the settings window instead.
@@ -918,7 +1337,7 @@ pub fn run(opts: Options) -> i32 {
         }));
 
         let Ok(hinst) = GetModuleHandleW(None) else { return 1 };
-        let class = wide(ipc::AGENT_CLASS);
+        let class = wide(&ipc::agent_class());
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
