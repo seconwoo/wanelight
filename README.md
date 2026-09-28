@@ -14,6 +14,12 @@ can notice and release within a fraction of a second.
 The animations below are illustrations: the real overlay is excluded from screen capture, so it
 can't be recorded. Dimming is exaggerated slightly so it reads at thumbnail size.
 
+### Torch mode, spotlight style
+
+A flashlight for your screen: only a soft circle around the pointer stays lit. Toggle it with Ctrl+Alt+Shift+T; the radius and dim level are adjustable.
+
+<p align="center"><img src="docs/torch-spotlight.svg" width="800" alt="Torch spotlight mode: a soft lit circle follows the pointer across a dimmed desktop, growing when the radius is increased"></p>
+
 ### Torch mode, panel style
 
 Only the panel under the pointer stays lit. Start typing and only the text box does.
