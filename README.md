@@ -7,6 +7,37 @@ that and dims only those areas. It ignores whether you are touching the mouse, s
 never dims and a game with a moving picture is left alone. Changes fade in slower than you
 can notice and release within a fraction of a second.
 
+<p align="center"><img src="docs/static-dimming.svg" width="800" alt="Static dimming: unchanged bright areas fade down slowly, a playing video is untouched, and changed content brightens at once"></p>
+
+## See it
+
+The animations below are illustrations: the real overlay is excluded from screen capture, so it
+can't be recorded. Dimming is exaggerated slightly so it reads at thumbnail size.
+
+### Torch mode, panel style
+
+Only the panel under the pointer stays lit. Start typing and only the text box does.
+
+<p align="center"><img src="docs/torch-panel.svg" width="800" alt="Torch panel mode: the lit panel follows the pointer from chat to sidebar to side pane, then only the message box stays lit while typing"></p>
+
+### Chrome hover-reveal
+
+In a full-screen app, unchanging toolbars, sidebars and status bars dim and light up again when you reach for them.
+
+<p align="center"><img src="docs/chrome-reveal.svg" width="800" alt="Chrome hover-reveal: toolbar, sidebar and status bar dim to half brightness; the toolbar lights up when the pointer approaches"></p>
+
+### Away
+
+No input and nothing moving for 5 minutes: the screen fades down. Any input brings it straight back.
+
+<p align="center"><img src="docs/away.svg" width="800" alt="Away mode: after 5 idle minutes with a still screen the display fades; moving the mouse restores it instantly"></p>
+
+### Wear heatmap
+
+The settings window shows how much light each part of each screen has emitted, so you can see where burn-in would appear first.
+
+<p align="center"><img src="docs/heatmap.svg" width="800" alt="Sample wear heatmap: the taskbar, clock, toolbar and a logo are the brightest spots"></p>
+
 ## What it does
 
 | Feature | Behaviour |

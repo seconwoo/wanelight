@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <title>Wanelight chrome hover-reveal: static toolbars and sidebars of a full-screen app dim, and light up when the pointer approaches</title>
+  <rect width="800" height="450" fill="#0d1117"/>
+  <rect x="6" y="6" width="788" height="394" rx="10" fill="#050608" stroke="#30363d"/>
+  <defs><clipPath id="scr"><rect x="6" y="6" width="788" height="394" rx="10"/></clipPath>
+    <clipPath id="content"><rect x="156" y="62" width="638" height="314"/></clipPath></defs>
+  <g clip-path="url(#scr)">
+    <!-- Tab strip + toolbar -->
+    <rect x="6" y="6" width="788" height="28" fill="#20252c"/>
+    <rect x="16" y="11" width="120" height="23" rx="5" fill="#2f3640"/><rect x="28" y="19" width="80" height="7" rx="3" fill="#e8ecf1"/>
+    <rect x="144" y="11" width="120" height="23" rx="5" fill="#252b33"/><rect x="156" y="19" width="70" height="7" rx="3" fill="#aab4c0"/>
+    <rect x="6" y="34" width="788" height="28" fill="#2a3038"/>
+    <g fill="#e8ecf1"><circle cx="24" cy="48" r="6"/><circle cx="46" cy="48" r="6"/><circle cx="68" cy="48" r="6"/></g>
+    <rect x="100" y="41" width="420" height="14" rx="7" fill="#3a424d"/><rect x="112" y="45" width="160" height="6" rx="3" fill="#c9d1d9"/>
+    <!-- Sidebar -->
+    <rect x="6" y="62" width="150" height="314" fill="#171b21"/>
+    <g fill="#aab4c0"><rect x="20" y="80" width="100" height="8" rx="4"/><rect x="20" y="102" width="84" height="8" rx="4"/><rect x="20" y="124" width="110" height="8" rx="4"/><rect x="20" y="146" width="72" height="8" rx="4"/><rect x="20" y="168" width="96" height="8" rx="4"/><rect x="20" y="190" width="80" height="8" rx="4"/></g>
+    <!-- Content (scrolling, so never dimmed) -->
+    <rect x="156" y="62" width="638" height="314" fill="#1b1f25"/>
+    <g clip-path="url(#content)">
+      <g fill="#c9d1d9">
+        <animateTransform attributeName="transform" type="translate" dur="10s" repeatCount="indefinite" values="0 0;0 -120"/>
+        <rect x="190" y="90" width="420" height="10" rx="5"/><rect x="190" y="112" width="500" height="10" rx="5"/><rect x="190" y="134" width="380" height="10" rx="5"/>
+        <rect x="190" y="170" width="460" height="10" rx="5"/><rect x="190" y="192" width="300" height="10" rx="5"/><rect x="190" y="214" width="520" height="10" rx="5"/>
+        <rect x="190" y="250" width="440" height="10" rx="5"/><rect x="190" y="272" width="360" height="10" rx="5"/><rect x="190" y="294" width="480" height="10" rx="5"/>
+        <rect x="190" y="330" width="400" height="10" rx="5"/><rect x="190" y="352" width="520" height="10" rx="5"/><rect x="190" y="374" width="330" height="10" rx="5"/>
+        <rect x="190" y="410" width="470" height="10" rx="5"/><rect x="190" y="432" width="390" height="10" rx="5"/><rect x="190" y="454" width="500" height="10" rx="5"/>
+      </g>
+    </g>
+    <!-- Status bar -->
+    <rect x="6" y="376" width="788" height="24" fill="#2563eb"/>
+    <g fill="#e8ecf1"><rect x="20" y="384" width="90" height="8" rx="4"/><rect x="660" y="384" width="110" height="8" rx="4"/></g>
+
+    <!-- Chrome dimming: top, left and bottom bands -->
+    <g fill="#000">
+      <rect x="6" y="6" width="788" height="56" opacity="0"><animate attributeName="opacity" dur="10s" repeatCount="indefinite" values="0;0;0.5;0.5;0;0;0.5;0.5;0" keyTimes="0;0.12;0.32;0.43;0.445;0.78;0.88;0.97;1" calcMode="spline" keySplines="0 0 1 1;.2 .6 .4 1;0 0 1 1;.2 .6 .4 1;0 0 1 1;.2 .6 .4 1;0 0 1 1;0 0 1 1"/></rect>
+      <rect x="6" y="62" width="150" height="314" opacity="0"><animate attributeName="opacity" dur="10s" repeatCount="indefinite" values="0;0;0.5;0.5;0" keyTimes="0;0.12;0.32;0.97;1" calcMode="spline" keySplines="0 0 1 1;.2 .6 .4 1;0 0 1 1;0 0 1 1"/></rect>
+      <rect x="6" y="376" width="788" height="24" opacity="0"><animate attributeName="opacity" dur="10s" repeatCount="indefinite" values="0;0;0.5;0.5;0" keyTimes="0;0.12;0.32;0.97;1" calcMode="spline" keySplines="0 0 1 1;.2 .6 .4 1;0 0 1 1;0 0 1 1"/></rect>
+    </g>
+
+    <!-- Click ripple on the toolbar -->
+    <circle cx="300" cy="48" r="4" fill="none" stroke="#f5c06a" stroke-width="2" opacity="0">
+      <animate attributeName="r" dur="10s" repeatCount="indefinite" values="4;4;18;18" keyTimes="0;0.52;0.56;1"/>
+      <animate attributeName="opacity" dur="10s" repeatCount="indefinite" values="0;0;1;0;0" keyTimes="0;0.52;0.53;0.57;1"/>
+    </circle>
+    <!-- Pointer -->
+    <g>
+      <animateTransform attributeName="transform" type="translate" dur="10s" repeatCount="indefinite" values="480 230;480 230;300 48;300 48;520 240;520 240" keyTimes="0;0.35;0.46;0.66;0.73;1" calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1;0 0 1 1"/>
+      <path d="M0 0 L0 20 L5.5 15 L9.5 24 L13 22.5 L9 13.5 L16 13.5 Z" fill="#fff" stroke="#000" stroke-width="1.2"/>
+    </g>
+  </g>
+  <g font-size="17" fill="#e6edf3" text-anchor="middle">
+    <text x="400" y="430" opacity="0">A full-screen app: toolbars, sidebar and status bar never change<animate attributeName="opacity" dur="10s" repeatCount="indefinite" values="1;1;0;0" keyTimes="0;0.12;0.13;1"/></text>
+    <text x="400" y="430" opacity="0">Their unchanging edges dim to 50% while the content stays bright<animate attributeName="opacity" dur="10s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.13;0.14;0.35;0.36;1"/></text>
+    <text x="400" y="430" opacity="0">Reach for a toolbar (or hold Alt) and it lights up instantly<animate attributeName="opacity" dur="10s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.36;0.37;0.73;0.74;1"/></text>
+    <text x="400" y="430" opacity="0">Back in the content, it softly dims again<animate attributeName="opacity" dur="10s" repeatCount="indefinite" values="0;0;1;1" keyTimes="0;0.74;0.75;1"/></text>
+  </g>
+</svg>
