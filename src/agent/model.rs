@@ -15,6 +15,8 @@ pub struct CellState {
 
 pub struct Model {
     pub cells: Vec<CellState>,
+    /// Fraction of cells that changed in the most recent frame.
+    pub last_change_fraction: f32,
     /// Last time a meaningful part of the screen changed.
     pub last_activity: f64,
     pub capturing: bool,
@@ -22,7 +24,7 @@ pub struct Model {
 
 impl Model {
     pub fn new(len: usize, now: f64) -> Self {
-        Self { cells: vec![CellState::default(); len], last_activity: now, capturing: false }
+        Self { cells: vec![CellState::default(); len], last_change_fraction: 0.0, last_activity: now, capturing: false }
     }
 
     pub fn apply(&mut self, sample: &Sample, dt: f32, now: f64) {
@@ -49,6 +51,7 @@ impl Model {
                     st.has_data = true;
                 }
                 // A clock tick or a blinking caret is not "activity"; a video or scrolling is.
+                self.last_change_fraction = changed as f32 / self.cells.len().max(1) as f32;
                 let significant = (self.cells.len() / 500).max(3);
                 if changed >= significant {
                     self.last_activity = now;

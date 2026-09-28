@@ -380,11 +380,11 @@ pub fn panel_probe(brief: bool) -> i32 {
             Ok(c) => {
                 if !brief {
                     show(
-                        &format!("point {:.0}%,{:.0}% of window ({} levels, {:.0} ms):", fx * 100.0, fy * 100.0, c.len(), t.elapsed().as_secs_f64() * 1000.0),
-                        &c,
+                        &format!("point {:.0}%,{:.0}% of window ({} levels, {:.0} ms):", fx * 100.0, fy * 100.0, c.nodes.len(), t.elapsed().as_secs_f64() * 1000.0),
+                        &c.nodes,
                     );
                 }
-                println!("  point {:>3.0}%,{:>3.0}% -> panel {}", fx * 100.0, fy * 100.0, fmt_rect(panels::choose_panel(&c, &win)));
+                println!("  point {:>3.0}%,{:>3.0}% -> panel {}", fx * 100.0, fy * 100.0, fmt_rect(panels::choose_panel(&uia, &c, &win, pt)));
             }
             Err(e) => println!("point {:.0}%,{:.0}%: {}", fx * 100.0, fy * 100.0, e.message()),
         }
@@ -393,9 +393,9 @@ pub fn panel_probe(brief: bool) -> i32 {
     match uia.focused_chain() {
         Ok(c) => {
             if !brief {
-                show(&format!("keyboard focus ({} levels, {:.0} ms):", c.len(), t.elapsed().as_secs_f64() * 1000.0), &c);
+                show(&format!("keyboard focus ({} levels, {:.0} ms):", c.nodes.len(), t.elapsed().as_secs_f64() * 1000.0), &c.nodes);
             }
-            println!("  keyboard focus -> input {}", fmt_rect(panels::choose_input(&c, &win)));
+            println!("  keyboard focus -> input {}", fmt_rect(panels::choose_input(&uia, &c, &win)));
         }
         Err(e) => println!("keyboard focus: {}", e.message()),
     }

@@ -18,6 +18,12 @@ pub struct Node {
     pub aria_role: String,
 }
 
+/// A container chain: nodes innermost first, with the UIA elements behind them.
+pub struct Chain {
+    pub nodes: Vec<Node>,
+    elements: Vec<IUIAutomationElement>,
+}
+
 pub struct Uia {
     uia: IUIAutomation,
     walker: IUIAutomationTreeWalker,
@@ -100,31 +106,43 @@ impl Uia {
     }
 
     /// The element and its ancestors, innermost first, up to (not including) the desktop.
-    fn chain_from(&self, el: IUIAutomationElement, max_depth: usize) -> Vec<Node> {
-        let mut out = Vec::new();
+    fn chain_from(&self, el: IUIAutomationElement, max_depth: usize) -> Chain {
+        let (mut nodes, mut elements) = (Vec::new(), Vec::new());
         let mut cur = Some(el);
         while let Some(el) = cur {
-            if out.len() >= max_depth {
+            if nodes.len() >= max_depth {
                 break;
             }
-            out.push(self.node(&el));
+            nodes.push(self.node(&el));
             cur = unsafe { self.walker.GetParentElementBuildCache(&el, &self.cache) }.ok();
+            elements.push(el);
         }
         // The last element reached is the desktop root; drop it.
-        if out.len() > 1 {
-            out.pop();
+        if nodes.len() > 1 {
+            nodes.pop();
+            elements.pop();
         }
-        out
+        Chain { nodes, elements }
     }
 
-    pub fn chain_at(&self, pt: POINT) -> Result<Vec<Node>> {
+    pub fn chain_at(&self, pt: POINT) -> Result<Chain> {
         let el = unsafe { self.uia.ElementFromPointBuildCache(pt, &self.cache)? };
         Ok(self.chain_from(el, 80))
     }
 
-    pub fn focused_chain(&self) -> Result<Vec<Node>> {
+    pub fn focused_chain(&self) -> Result<Chain> {
         let el = unsafe { self.uia.GetFocusedElementBuildCache(&self.cache)? };
         Ok(self.chain_from(el, 80))
+    }
+
+    /// Bounding rects of an element's direct children (at most 64).
+    fn children_rects(&self, el: &IUIAutomationElement) -> Vec<RECT> {
+        unsafe {
+            let Ok(cond) = self.uia.CreateTrueCondition() else { return Vec::new() };
+            let Ok(arr) = el.FindAllBuildCache(TreeScope_Children, &cond, &self.cache) else { return Vec::new() };
+            let n = arr.Length().unwrap_or(0).clamp(0, 64);
+            (0..n).filter_map(|i| arr.GetElement(i).ok()?.CachedBoundingRectangle().ok()).collect()
+        }
     }
 }
 
@@ -132,60 +150,148 @@ fn intersect(a: &RECT, b: &RECT) -> RECT {
     RECT { left: a.left.max(b.left), top: a.top.max(b.top), right: a.right.min(b.right), bottom: a.bottom.min(b.bottom) }
 }
 
-/// Visible part of each chain element: clipped to all of its ancestors and the window.
-/// The result is nested, so areas never shrink going outward.
-fn clip_chain(chain: &[Node], window: &RECT) -> Vec<RECT> {
-    let mut out = vec![RECT::default(); chain.len()];
-    let mut outer = *window;
-    for (i, n) in chain.iter().enumerate().rev() {
-        outer = intersect(&n.rect, &outer);
-        out[i] = outer;
+fn contains(r: &RECT, pt: POINT) -> bool {
+    pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom
+}
+
+fn center(r: &RECT) -> POINT {
+    POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 }
+}
+
+fn width(r: &RECT) -> f64 {
+    (r.right - r.left).max(0) as f64
+}
+
+fn height(r: &RECT) -> f64 {
+    (r.bottom - r.top).max(0) as f64
+}
+
+/// One level of the container chain: its visible rect (clipped to the window)
+/// and the raw chain indices of its innermost and outermost element.
+#[derive(Clone, Copy)]
+struct Level {
+    rect: RECT,
+    outer: usize,
+}
+
+/// Chain elements that really contain `pt`, innermost first, never shrinking
+/// going outward, with same-size wrappers merged into one level. Ancestors
+/// are not trusted to enclose their children: web layouts often report stale
+/// or narrower bounds for wrappers, so those are skipped rather than used.
+fn levels(chain: &Chain, window: &RECT, pt: POINT) -> Vec<Level> {
+    let mut out: Vec<Level> = Vec::new();
+    for (i, n) in chain.nodes.iter().enumerate() {
+        let r = intersect(&n.rect, window);
+        if !contains(&r, pt) {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last) if area(&r) < area(&last.rect) => {}
+            Some(last) if area(&r) <= area(&last.rect) * 1.05 => {
+                last.rect = r;
+                last.outer = i;
+            }
+            _ => out.push(Level { rect: r, outer: i }),
+        }
     }
     out
 }
 
-/// The panel to light for a pointer position: the largest container under the
-/// point that is still clearly smaller than its window (sidebar, main area,
-/// side pane).
-pub fn choose_panel(chain: &[Node], window: &RECT) -> Option<RECT> {
-    let wa = area(window).max(1.0);
-    let mut best = None;
-    for r in clip_chain(chain, window) {
-        if area(&r) > 0.75 * wa {
-            break;
+struct Columns<'a> {
+    uia: &'a Uia,
+    chain: &'a Chain,
+    window: RECT,
+    levels: Vec<Level>,
+    children: std::collections::HashMap<usize, Vec<RECT>>,
+}
+
+impl Columns<'_> {
+    /// Is level `k` one column of a side-by-side layout? Its parent must be
+    /// nearly the same height and leave room beside it, and the parent must
+    /// really have another child next to it (this rejects stale bounds).
+    fn is_column(&mut self, k: usize) -> bool {
+        let Some(outer) = self.levels.get(k + 1).map(|l| l.rect) else { return false };
+        let inner = self.levels[k].rect;
+        if height(&inner) < 0.8 * height(&outer) || width(&inner) > width(&outer) - 100.0 {
+            return false;
         }
-        if r.right - r.left >= 160 && r.bottom - r.top >= 120 {
+        // The sibling may hang off any of the same-size wrappers that make up
+        // the parent level (e.g. a sidebar outside a full-width `main`).
+        let (uia, window) = (self.uia, self.window);
+        for raw in self.levels[k].outer + 1..=self.levels[k + 1].outer {
+            let Some(el) = self.chain.elements.get(raw) else { break };
+            let kids = self
+                .children
+                .entry(raw)
+                .or_insert_with(|| uia.children_rects(el).iter().map(|r| intersect(r, &window)).collect());
+            let found = kids.iter().any(|s| {
+                let beside = s.right <= inner.left + 8 || s.left >= inner.right - 8;
+                let overlap = (s.bottom.min(inner.bottom) - s.top.max(inner.top)).max(0) as f64;
+                beside && width(s) >= 60.0 && overlap >= 0.5 * height(s).min(height(&inner))
+            });
+            if found {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// The panel to light for a pointer position: the outermost column of a
+/// side-by-side layout under the point (sidebar, main area, side pane) that is
+/// not itself split into columns. So 3 columns closing to 2 simply widens the
+/// panel. Without a column layout, the largest container under 75 % of the
+/// window is used.
+pub fn choose_panel(uia: &Uia, chain: &Chain, window: &RECT, pt: POINT) -> Option<RECT> {
+    let wa = area(window).max(1.0);
+    let mut c = Columns { uia, chain, window: *window, levels: levels(chain, window, pt), children: Default::default() };
+    let mut best = None;
+    for k in 0..c.levels.len() {
+        let r = c.levels[k].rect;
+        if width(&r) < 160.0 || height(&r) < 120.0 || area(&r) > 0.95 * wa {
+            continue;
+        }
+        // Check the cheap geometric condition first; siblings only when needed.
+        if c.is_column(k) && !(k > 0 && c.is_column(k - 1)) {
             best = Some(r);
         }
     }
-    best
+    best.or_else(|| {
+        c.levels
+            .iter()
+            .map(|l| l.rect)
+            .take_while(|r| area(r) <= 0.75 * wa)
+            .filter(|r| width(r) >= 160.0 && height(r) >= 120.0)
+            .last()
+    })
 }
 
 /// The input area to light while typing: the largest container around the
 /// keyboard focus that is still small (the text box with its buttons). Falls
 /// back to the surrounding panel when the focus is tiny (e.g. an editor's
 /// hidden text field).
-pub fn choose_input(chain: &[Node], window: &RECT) -> Option<RECT> {
+pub fn choose_input(uia: &Uia, chain: &Chain, window: &RECT) -> Option<RECT> {
+    let pt = center(&chain.nodes.first()?.rect);
     let wa = area(window).max(1.0);
-    let wh = (window.bottom - window.top).max(1) as f64;
+    let wh = height(window).max(1.0);
     let mut best: Option<RECT> = None;
-    for r in clip_chain(chain, window) {
-        if area(&r) > 0.08 * wa || (r.bottom - r.top) as f64 > 0.35 * wh {
+    for l in levels(chain, window, pt) {
+        if area(&l.rect) > 0.08 * wa || height(&l.rect) > 0.35 * wh {
             break;
         }
-        best = Some(r);
+        best = Some(l.rect);
     }
     match best {
-        Some(r) if r.right - r.left >= 120 && r.bottom - r.top >= 16 => Some(r),
-        _ => choose_panel(chain, window),
+        Some(r) if width(&r) >= 120.0 && height(&r) >= 16.0 => Some(r),
+        _ => choose_panel(uia, chain, window, pt),
     }
 }
 
 /// True when only the app's outer shell is exposed (e.g. Chromium before its
 /// accessibility tree is built): worth asking again shortly.
-pub fn shell_only(chain: &[Node], window: &RECT) -> bool {
+pub fn shell_only(chain: &Chain, window: &RECT) -> bool {
     let wa = area(window).max(1.0);
-    clip_chain(chain, window).first().is_some_and(|r| area(r) > 0.9 * wa)
+    chain.nodes.first().is_some_and(|n| area(&intersect(&n.rect, window)) > 0.9 * wa)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -260,15 +366,29 @@ impl PanelWorker {
                     let root = unsafe { GetAncestor(WindowFromPoint(pt), GA_ROOT) };
                     let window = window_rect(root);
                     let (rect, retry) = match uia.chain_at(pt) {
-                        Ok(c) => (choose_panel(&c, &window), shell_only(&c, &window)),
-                        Err(_) => (None, false),
+                        Ok(c) => {
+                            if crate::util::debug_enabled() {
+                                let sizes: Vec<String> =
+                                    c.nodes.iter().take(8).map(|n| format!("{}x{}", n.rect.right - n.rect.left, n.rect.bottom - n.rect.top)).collect();
+                                crate::log!(
+                                    "panels: at ({x},{y}) window {:?} chain {}",
+                                    (window.left, window.top, window.right, window.bottom),
+                                    sizes.join(" < ")
+                                );
+                            }
+                            (choose_panel(&uia, &c, &window, pt), shell_only(&c, &window))
+                        }
+                        Err(e) => {
+                            crate::log!("panels: lookup at ({x},{y}) failed: {}", e.message());
+                            (None, false)
+                        }
                     };
                     batch.push(Answer { query: q, rect, retry });
                 }
                 if focus {
                     let window = window_rect(unsafe { GetForegroundWindow() });
                     let (rect, retry) = match uia.focused_chain() {
-                        Ok(c) => (choose_input(&c, &window), shell_only(&c, &window)),
+                        Ok(c) => (choose_input(&uia, &c, &window), shell_only(&c, &window)),
                         Err(_) => (None, false),
                     };
                     batch.push(Answer { query: Query::Focus, rect, retry });

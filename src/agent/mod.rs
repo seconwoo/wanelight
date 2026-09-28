@@ -163,6 +163,10 @@ struct PanelTracker {
     last_query_ptr: (i32, i32),
     last_focus_query: f64,
     retry_at: Option<f64>,
+    /// Scheduled fresh lookups after something may have changed the layout
+    /// (a click, a shortcut, a large redraw), even if the pointer hasn't moved.
+    requery_at: Vec<f64>,
+    last_layout_requery: f64,
     /// Retries left for an app that hasn't exposed its layout yet.
     retries_left: u32,
     /// Input without pointer movement or a key event yet (a click or scroll,
@@ -381,6 +385,16 @@ impl Agent {
             self.panel_on_secs += dt as f64;
         }
 
+        if self.panel_mode_active(now)
+            && now - self.panel.last_layout_requery >= 1.0
+            && self.screens.iter().any(|s| s.model.last_change_fraction >= 0.08)
+        {
+            self.panel.last_layout_requery = now;
+            self.panel.requery_at.push(now);
+            if util::debug_enabled() {
+                log!("panels: large redraw, looking up panels again");
+            }
+        }
         self.update_away(now, idle);
         self.compute_targets(now);
         let animating = self.animate();
@@ -813,6 +827,7 @@ impl Agent {
         if std::mem::take(&mut pt.key_pending) {
             pt.typing = true;
             pt.unexplained_input_at = None;
+            pt.requery_at = vec![now + 0.15, now + 0.7];
             if now - pt.last_focus_query > 0.25 {
                 pt.retries_left = pt.retries_left.max(5);
                 pt.last_focus_query = now;
@@ -821,6 +836,10 @@ impl Agent {
                 }
             }
         } else if moved {
+            if pt.typing {
+                // Back from typing: the layout may have changed meanwhile.
+                pt.requery_at.push(now);
+            }
             pt.typing = false;
             pt.unexplained_input_at = None;
         } else if other_input {
@@ -830,13 +849,17 @@ impl Agent {
         if pt.unexplained_input_at.is_some_and(|t| now - t >= 0.05) {
             pt.unexplained_input_at = None;
             pt.typing = false;
+            pt.requery_at = vec![now + 0.15, now + 0.7];
         }
+        let before_len = pt.requery_at.len();
+        pt.requery_at.retain(|&t| t > now);
+        let force = pt.requery_at.len() != before_len;
         if !pt.typing {
             let inside = pt.mouse_rect.is_some_and(|r| p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom);
             let new_spot = (p.x, p.y) != pt.last_query_ptr;
             // Window events already trigger a fresh lookup; the slow refresh only catches
             // layout changes inside an app (a pane opened or resized).
-            let due = (!inside && new_spot && now - pt.last_point_query > 0.04) || now - pt.last_point_query > 10.0;
+            let due = force || (!inside && new_spot && now - pt.last_point_query > 0.04) || now - pt.last_point_query > 4.0;
             if due {
                 if new_spot {
                     pt.retries_left = 5;
@@ -847,7 +870,7 @@ impl Agent {
                     w.ask(panels::Query::Point(p.x, p.y));
                 }
             }
-        } else if now - pt.last_focus_query > 1.0 {
+        } else if force || now - pt.last_focus_query > 1.0 {
             // The text box can grow as you type.
             pt.last_focus_query = now;
             if let Some(w) = &pt.worker {
