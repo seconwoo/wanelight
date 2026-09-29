@@ -641,6 +641,11 @@ fn monitor_id(device_path: &str, gdi: &str) -> String {
     format!("{}-{:08x}", clean, fnv1a(device_path.to_ascii_lowercase().as_bytes()) as u32)
 }
 
+/// True for an id made from the GDI name because the device path was missing.
+pub fn is_fallback_id(id: &str) -> bool {
+    id.starts_with("gdi-")
+}
+
 pub struct Enumeration {
     pub displays: Vec<Display>,
     pub gpus: Vec<Rc<Gpu>>,

@@ -116,7 +116,7 @@ impl Ledger {
                     }
             }
         }
-        out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+        out.sort_by(|a, b| a.1.name.cmp(&b.1.name).then(b.1.seconds.total_cmp(&a.1.seconds)));
         out
     }
 }

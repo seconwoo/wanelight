@@ -50,6 +50,8 @@ const PANEL_HALO_PX: f32 = 90.0;
 const HOTKEY_ID: i32 = 1;
 const HOTKEY_TORCH: i32 = 2;
 const HOTKEY_BLACKS: i32 = 3;
+/// Rebuilds to wait for a waking monitor's device path before using a fallback id.
+const ID_RETRIES: u32 = 10;
 /// Frame interval while animating (~60 fps).
 const FAST_MS: u32 = 16;
 /// Frame interval while only watching the pointer or input (~30 fps).
@@ -131,6 +133,9 @@ struct Agent {
     /// Current frame-timer interval in ms (0 = off).
     frame_ms: u32,
     rebuild_pending: bool,
+    /// (GDI name, monitor id) pairs seen with a real device path.
+    known_ids: Vec<(String, String)>,
+    id_retries: u32,
     last_ledger_save: f64,
     last_state_save: f64,
     reminder_shown: bool,
@@ -230,6 +235,8 @@ impl Agent {
             panel_on_secs,
             frame_ms: 0,
             rebuild_pending: false,
+            known_ids: Vec::new(),
+            id_retries: ID_RETRIES,
             last_ledger_save: now,
             last_state_save: now,
             reminder_shown: false,
@@ -254,10 +261,25 @@ impl Agent {
         self.save_ledgers();
         self.screens.clear();
         let now = util::now();
+        let mut unresolved = false;
         match capture::enumerate() {
             Ok(e) => {
                 self.overlay_gpu = e.gpus.first().cloned().or_else(|| Gpu::new(None, None).ok().map(Rc::new));
-                for d in e.displays {
+                for mut d in e.displays {
+                    // Right after the displays wake, Windows can report a monitor without
+                    // its device path, which gives it a fallback id and a separate ledger.
+                    // Reuse the id seen before, or wait a few seconds for the real one.
+                    if capture::is_fallback_id(&d.id) {
+                        if let Some((_, id)) = self.known_ids.iter().find(|(g, _)| *g == d.gdi_name) {
+                            d.id = id.clone();
+                        } else if self.id_retries > 0 {
+                            unresolved = true;
+                            continue;
+                        }
+                    } else {
+                        self.known_ids.retain(|(g, _)| *g != d.gdi_name);
+                        self.known_ids.push((d.gdi_name.clone(), d.id.clone()));
+                    }
                     let len = d.geom.len();
                     log!(
                         "display {} \"{}\" {} {}x{} at ({},{}) hdr={} sdr_white={:.2} grid={}x{}",
@@ -293,6 +315,13 @@ impl Agent {
                 }
             }
             Err(e) => log!("display enumeration failed: {}", e.message()),
+        }
+        if unresolved {
+            self.id_retries -= 1;
+            self.rebuild_pending = true;
+            log!("display without a device path; looking again ({} tries left)", self.id_retries);
+        } else {
+            self.id_retries = ID_RETRIES;
         }
         // Remember monitors in the config so the settings window can list them.
         let mut changed = false;
