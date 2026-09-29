@@ -129,7 +129,7 @@ Get `wanelight.exe` from [Releases](https://github.com/seconwoo/wanelight/releas
 
 Wanelight is provided as is, without warranty of any kind. Use it at your own risk. It can
 reduce burn-in but can't prevent it entirely, and the author isn't responsible for any damage
-to your display, system or data. See the MIT license for the full terms.
+to your display, system or data. See the [MIT license](LICENSE) for the full terms.
 
 ## Support
 
