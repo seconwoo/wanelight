@@ -24,7 +24,10 @@ const W = 288, H = 192, COLS = 16;
 const CLIPS = [
   ['walk', 8], ['run', 6], ['sit', 12], ['groom', 12], ['stare', 8], ['reach', 18], ['startle', 6],
   ['stalk', 8], ['wiggle', 6], ['pounce', 8], ['fly', 8], ['chew', 8], ['chewsit', 8],
+  ['jump', 8], ['scratch', 12],
 ];
+// Where the claws meet the wall in scratch frames (x in the frame).
+const SCRATCH_X = 170;
 // Firefly frames sit in the middle of their cell: FLY x FLY px at (FLY_X, FLY_Y).
 const FLY = 32, FLY_X = 128, FLY_Y = 80;
 const C = {
@@ -41,7 +44,7 @@ function pose(name, i, n) {
   const t = i / n, u = n > 1 ? i / (n - 1) : 0;
   const p = { sit: false, bob: 0, lean: 0, legPh: 0, legAmp: 0, tail: 0, tilt: 0, blink: 0, ears: 0,
               mouth: 0, ext: 0, wig: 0, pupil: 2.6, stretch: 0, groom: 0, paw: 0, puff: 0, lick: 0, headDY: 0,
-              crouch: 0, leap: 0, rump: 0 };
+              crouch: 0, leap: 0, rump: 0, upright: false, stroke: 0 };
   switch (name) {
     case 'walk':
       Object.assign(p, { legPh: t * TAU, legAmp: 0.5, bob: 2.5 * Math.abs(Math.sin(t * TAU)), tail: 0.25 * Math.sin(t * TAU) });
@@ -85,6 +88,17 @@ function pose(name, i, n) {
                          mouth: smooth(0.2, 0.4, u) * (1 - smooth(0.75, 0.9, u)) });
       p.stretch = 12 * p.leap;
       break;
+    case 'jump':
+      // Crouch, spring, tuck, land: a pounce with the mouth shut.
+      Object.assign(p, { ears: 0.1, tail: 0.3, pupil: 3.5,
+                         crouch: 1 - smooth(0.1, 0.3, u) + smooth(0.75, 0.95, u),
+                         leap: 0.8 * smooth(0.15, 0.35, u) * (1 - smooth(0.65, 0.85, u)) });
+      p.stretch = 8 * p.leap;
+      break;
+    case 'scratch':
+      // Up on the hind legs, claws dragging down the wall, one paw then the other.
+      Object.assign(p, { upright: true, stroke: t, ears: 0.2, blink: 0.35, tail: 0.5 * Math.sin(t * TAU) });
+      break;
     case 'chew':
     case 'chewsit':
       // Three chomps with happy squints, then a lick.
@@ -117,7 +131,23 @@ function drawCat(ctx, p) {
   const leg = (hx, hy, ang, len, r) => capsule(hx, hy, hx + len * Math.sin(ang), hy + len * Math.cos(ang), r);
 
   let head;
-  if (!p.sit) {
+  if (p.upright) {
+    // Paw height over a stroke: drag down slowly, lift back quickly.
+    const drag = ph => { const f = ((ph % 1) + 1) % 1; return f < 0.7 ? f / 0.7 : 1 - (f - 0.7) / 0.3; };
+    const near = 70 + 44 * drag(p.stroke), far = 70 + 44 * drag(p.stroke + 0.5);
+    add(C.fur, c => {
+      c.moveTo(74, 166);
+      c.bezierCurveTo(46, 160, 34, 130, 40 + 8 * p.tail, 96);
+    }, { stroke: 11 });
+    add(C.furFar, capsule(132, 100, SCRATCH_X - 6, far, 6.5));
+    add(C.furFar, capsule(96, 170, 104, 182, 7));
+    add(C.fur, ell(92, 162, 24, 20), { shade: true });
+    add(C.fur, ell(116, 124, 25, 42, 0.38), { shade: true });
+    add(C.fur, capsule(84, 170, 90, 182, 7.5));
+    add(C.fur, capsule(136, 104, SCRATCH_X - 6, near, 7));
+    head = { x: 138, y: 72 };
+    p.clawNear = near; p.clawFar = far;
+  } else if (!p.sit) {
     const by = 146 - p.bob + 12 * p.crouch, bx = 100 + p.lean;
     // Tail
     const sw = p.tail, puff = 11 + 7 * p.puff;
@@ -243,6 +273,14 @@ function drawCat(ctx, p) {
     ctx.beginPath(); ctx.moveTo(wx, wy); ctx.quadraticCurveTo(wx + 14, wy + k * 3 - 2, wx + 28, wy + k * 6); ctx.stroke();
   }
 
+  if (p.upright) {
+    ctx.strokeStyle = 'rgba(200, 210, 240, 0.8)'; ctx.lineWidth = 1.2;
+    for (const y of [p.clawNear, p.clawFar]) {
+      for (let k = -1; k <= 1; k++) {
+        ctx.beginPath(); ctx.moveTo(SCRATCH_X - 2 + k * 3, y - 2); ctx.lineTo(SCRATCH_X + 1 + k * 3, y + 5); ctx.stroke();
+      }
+    }
+  }
   const tip = p.ext > 0.01 ? drawTentacles(ctx, mx, my, p) : null;
   return { mouth: [mx, my], tip };
 }
@@ -330,7 +368,7 @@ function bake() {
     a.beginPath(); a.rect(0, 0, W, H); a.clip();
     meta.push(drawFrame(a, name, i, n)); a.restore();
   });
-  document.getElementById('meta').textContent = JSON.stringify({ clips: CLIPS, frames: meta });
+  document.getElementById('meta').textContent = JSON.stringify({ clips: CLIPS, frames: meta, consts: { SCRATCH_X } });
   document.getElementById('out').textContent = atlas.toDataURL('image/png');
   const sheet = document.createElement('canvas');
   sheet.width = atlas.width / 2; sheet.height = atlas.height / 2;

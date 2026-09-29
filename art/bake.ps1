@@ -30,6 +30,9 @@ foreach ($c in $meta.clips) {
     $lines += "pub const $($c[0].ToUpper()): (usize, usize) = ($first, $($c[1]));"
     $first += [int]$c[1]
 }
+foreach ($c in $meta.consts.PSObject.Properties) {
+    $lines += "pub const $($c.Name): f32 = $(([double]$c.Value).ToString('0.0', $f));"
+}
 $n = $meta.frames.Count
 $lines += '', '/// Mouth position in each frame (px, facing right).'
 $lines += "pub const MOUTH: [(f32, f32); $n] = ["

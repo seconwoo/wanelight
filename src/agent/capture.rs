@@ -367,6 +367,13 @@ impl OutputCapture {
         }
     }
 
+    /// The last captured frame (8-bit BGRA or FP16 scRGB), if it is in monitor
+    /// orientation so it can be copied straight into a sprite. Used by spooky mode.
+    pub fn latest_frame(&self) -> Option<&ID3D11Texture2D> {
+        let f = self.frames.as_ref().filter(|f| f.has_prev)?;
+        (self.rotation == DXGI_MODE_ROTATION_IDENTITY).then(|| &f.tex[f.cur])
+    }
+
     /// Drops the duplication so the next sample starts fresh (e.g. after sleep).
     pub fn reset(&mut self) {
         self.dupl = None;

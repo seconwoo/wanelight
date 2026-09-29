@@ -94,6 +94,9 @@ struct Screen {
     last_attention: f64,
     fullscreen: bool,
     enabled: bool,
+    /// Windows on this monitor for spooky mode's cat, top of the z-order first,
+    /// and whether it may play with each one.
+    cat_wins: Vec<(RECT, bool)>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -319,6 +322,7 @@ impl Agent {
                         last_attention: now,
                         fullscreen: false,
                         enabled: true,
+                        cat_wins: Vec::new(),
                         d,
                     });
                 }
@@ -549,6 +553,22 @@ impl Agent {
                 .fg_rect
                 .is_some_and(|r| r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom);
             s.enabled = self.cfg.monitor_enabled(&s.d.id);
+            // Windows for spooky mode's cat: it plays with ordinary ones, while the
+            // taskbar and windows filling most of the screen only hide what's under them.
+            let area = ((m.right - m.left) as i64 * (m.bottom - m.top) as i64).max(1);
+            s.cat_wins.clear();
+            s.cat_wins.extend(
+                self.snap
+                    .wins
+                    .iter()
+                    .filter(|w| w.rect.left < m.right && w.rect.right > m.left && w.rect.top < m.bottom && w.rect.bottom > m.top)
+                    .map(|w| {
+                        let r = w.rect;
+                        let (wd, ht) = (r.right - r.left, r.bottom - r.top);
+                        let play = w.kind == winmap::Kind::Normal && wd >= 200 && ht >= 150 && (wd as i64 * ht as i64) * 10 < area * 8;
+                        (r, play)
+                    }),
+            );
         }
     }
 
@@ -1069,12 +1089,17 @@ impl Agent {
                     target: &s.target,
                     dim: spook::DIM,
                     pointer: (cursor.x as f32, cursor.y as f32),
+                    wins: &s.cat_wins,
                 };
                 k.cat(now, i, &env)
             });
             shown |= scene.is_some();
+            // A scratched window is copied from the last captured frame, which only
+            // works when capture and overlay share a GPU.
+            let same_gpu = self.overlay_gpu.as_ref().is_some_and(|g| Rc::ptr_eq(g, &s.d.gpu));
+            let desktop = if same_gpu { s.d.capture.latest_frame() } else { None };
             if let Some(o) = &mut s.overlay
-                && let Err(e) = o.set_scene(&scene.unwrap_or_default())
+                && let Err(e) = o.set_scene(&scene.unwrap_or_default(), desktop)
             {
                 log!("overlay: cat update failed for {}: {}", s.d.name, e.message());
             }

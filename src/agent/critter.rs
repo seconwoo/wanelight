@@ -1,7 +1,9 @@
 //! Spooky mode's visitor: a little shadow cat that pads about in the dark,
-//! hunts the fireflies drifting there, comes to the edge of the torch when
-//! the pointer rests, and reaches into the light with the tentacles hidden in
-//! its mouth. It bolts when the light lands on it or the pointer lunges at it.
+//! hunts the fireflies drifting there, plays with the windows on screen
+//! (walks along their top edges, leaps between them, hides behind them and
+//! scratches them), comes to the edge of the torch when the pointer rests,
+//! and reaches into the light with the tentacles hidden in its mouth. It
+//! bolts when the light lands on it or the pointer lunges at it.
 //!
 //! The sprites come from art/cat/cat.html (baked by art/bake.ps1), which also
 //! generates cat_frames.rs: clip ranges and where the mouth and tentacle tip
@@ -11,7 +13,7 @@ use windows::Win32::Foundation::RECT;
 
 use super::capture::{CELL, GridGeom};
 use super::cat_frames as cf;
-use crate::log;
+use crate::{log, util};
 
 /// Sprite frame size (px) and atlas columns.
 pub const FRAME_W: u32 = 288;
@@ -29,6 +31,18 @@ const GRAB_FRAME: usize = 7;
 /// Pounce frame where the jaws snap shut.
 const SNAP_FRAME: usize = 6;
 
+/// Test hook (debug runs only): `WANELIGHT_DEBUG_CAT` set to `windows` leaves
+/// out the fireflies and the torch visits, so the cat only plays with windows;
+/// `climb`, `hide` or `scratch` also makes it pick that game every time.
+fn debug_cat() -> &'static str {
+    static MODE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MODE.get_or_init(|| if util::debug_enabled() { std::env::var("WANELIGHT_DEBUG_CAT").unwrap_or_default() } else { String::new() })
+}
+
+fn windows_only() -> bool {
+    matches!(debug_cat(), "windows" | "climb" | "hide" | "scratch")
+}
+
 /// A point of frame `frame` relative to the feet (px at scale 1, facing right).
 fn offset(p: (f32, f32)) -> (f32, f32) {
     (p.0 - ANCHOR.0, p.1 - ANCHOR.1)
@@ -42,6 +56,18 @@ pub struct CritterDraw {
     pub scale: f32,
     pub frame: usize,
     pub flip: bool,
+    /// Only this horizontal range (screen px) shows, while hiding behind a window.
+    pub clip: Option<(f32, f32)>,
+}
+
+/// A window the cat is scratching: a copy of it shown offset by (dx, dy).
+/// A new `id` means a new scratch, so the copy is taken again.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ShakeDraw {
+    pub rect: RECT,
+    pub dx: f32,
+    pub dy: f32,
+    pub id: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -58,6 +84,7 @@ pub struct FlyDraw {
 pub struct Scene {
     pub cat: Option<CritterDraw>,
     pub flies: [Option<FlyDraw>; MAX_FLIES],
+    pub shake: Option<ShakeDraw>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,6 +101,8 @@ enum Clip {
     Pounce,
     Chew,
     ChewSit,
+    Jump,
+    Scratch,
 }
 
 impl Clip {
@@ -92,6 +121,9 @@ impl Clip {
             Clip::Pounce => (cf::POUNCE, cf::POUNCE.1 as f64 / POUNCE_SECS, false),
             Clip::Chew => (cf::CHEW, 10.0, true),
             Clip::ChewSit => (cf::CHEWSIT, 10.0, true),
+            // Jumps are timed per leap; see `jump_to`.
+            Clip::Jump => (cf::JUMP, 12.0, false),
+            Clip::Scratch => (cf::SCRATCH, 12.0, true),
         };
         (first, n, fps, looped)
     }
@@ -128,6 +160,17 @@ enum State {
     /// Grabbing a firefly with the tentacles.
     Snatch,
     Eat,
+    /// Walking to where it will spring up onto a window's top edge.
+    Climb,
+    Jump,
+    /// Walking behind a window, out of sight.
+    Sneak,
+    Hidden,
+    /// Looking out from behind a window's edge.
+    Peek,
+    /// Walking to a window's side edge to scratch it.
+    ToScratch,
+    Scratch,
     Startle,
     /// Running off screen.
     Flee,
@@ -141,6 +184,32 @@ enum Attack {
     Snatch,
 }
 
+/// Where the cat's feet are: anywhere on the screen, or on a window's top edge.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Ground {
+    Floor,
+    /// Top edge at `y`, walkable from `x0` to `x1`.
+    Ledge { y: f32, x0: f32, x1: f32 },
+}
+
+struct Jump {
+    from: (f32, f32),
+    to: (f32, f32),
+    start: f64,
+    secs: f64,
+    height: f32,
+    land: Ground,
+    then: State,
+}
+
+/// A window the cat hides behind, and which side it went in from (-1 left, 1 right).
+#[derive(Clone, Copy)]
+struct Cover {
+    rect: RECT,
+    side: f32,
+    through: bool,
+}
+
 /// What the cat can see of one monitor.
 pub struct Env<'a> {
     pub mon: RECT,
@@ -149,9 +218,17 @@ pub struct Env<'a> {
     pub target: &'a [f32],
     pub dim: f32,
     pub pointer: (f32, f32),
+    /// Windows on this monitor, top of the z-order first, and whether the cat
+    /// may play with each (big ones and the taskbar only get in the way).
+    pub wins: &'a [(RECT, bool)],
 }
 
 impl Env<'_> {
+    /// Whether a window above window `i` in the z-order covers (x, y).
+    fn covered(&self, i: usize, x: f32, y: f32) -> bool {
+        self.wins[..i].iter().any(|(r, _)| x >= r.left as f32 && x < r.right as f32 && y >= r.top as f32 && y < r.bottom as f32)
+    }
+
     fn dark(&self, x: f32, y: f32) -> bool {
         self.dark_to(x, y, 0.5)
     }
@@ -284,6 +361,17 @@ pub struct Critter {
     pounce: Option<Pounce>,
     misses: u32,
     hunt_after: f64,
+    ground: Ground,
+    jump: Option<Jump>,
+    /// Where to leap once the cat reaches its launch spot.
+    leap: Option<((f32, f32), Ground)>,
+    cover: Option<Cover>,
+    scratch: Option<(RECT, f64)>,
+    scratches: u32,
+    ledge_checked: f64,
+    /// Reaches into the light this visit to the rim, and when the light is interesting again.
+    reaches: u32,
+    rim_after: f64,
     done: bool,
 }
 
@@ -297,8 +385,13 @@ const BRAKE: f32 = 520.0;
 const POUNCE_SECS: f64 = 0.55;
 /// Horizontal distance of a pounce (px at scale 1).
 const POUNCE_REACH: f32 = 150.0;
-const VISIT_SECS: f64 = 90.0;
-const MAX_SECS: f64 = 160.0;
+const VISIT_SECS: f64 = 120.0;
+const MAX_SECS: f64 = 200.0;
+/// How far the cat can leap between windows (px at scale 1).
+const LEAP_UP: f32 = 450.0;
+const LEAP_ACROSS: f32 = 700.0;
+/// How much a scratched window shakes (px at scale 1).
+const SHAKE: f32 = 3.0;
 /// The pointer counts as resting after this long.
 const REST_SECS: f64 = 3.0;
 const FLIES_PER_VISIT: usize = 4;
@@ -337,6 +430,15 @@ impl Critter {
             pounce: None,
             misses: 0,
             hunt_after: now,
+            ground: Ground::Floor,
+            jump: None,
+            leap: None,
+            cover: None,
+            scratch: None,
+            scratches: 0,
+            ledge_checked: now,
+            reaches: 0,
+            rim_after: now,
             done: false,
         };
         let from_left = env.pointer.0 > (m.left + m.right) as f32 / 2.0;
@@ -470,6 +572,194 @@ impl Critter {
         (x, self.pos.1)
     }
 
+    /// Walkable top edges of windows: the stretch of each top edge that isn't
+    /// under a window higher in the z-order and has dark room above it.
+    fn ledges(&self, env: &Env) -> Vec<(f32, f32, f32)> {
+        let (m, s) = (env.mon, self.scale);
+        let mut out = Vec::new();
+        for (i, (r, play)) in env.wins.iter().enumerate() {
+            let y = r.top as f32;
+            if !play || y < m.top as f32 + 170.0 * s || y > m.bottom as f32 - 20.0 * s {
+                continue;
+            }
+            let (mut x0, mut x1) = (r.left.max(m.left) as f32, r.right.min(m.right) as f32);
+            // Trim away windows above it in the z-order that cover the edge or the space over it.
+            for (h, _) in &env.wins[..i] {
+                if (h.top as f32) < y + 2.0 && (h.bottom as f32) > y - 150.0 * s && (h.right as f32) > x0 && (h.left as f32) < x1 {
+                    let (hl, hr) = (h.left as f32, h.right as f32);
+                    if hl - x0 > x1 - hr {
+                        x1 = x1.min(hl);
+                    } else {
+                        x0 = x0.max(hr);
+                    }
+                }
+            }
+            let (x0, x1) = (x0 + 40.0 * s, x1 - 40.0 * s);
+            if x1 - x0 < 200.0 * s {
+                continue;
+            }
+            let dark = [x0, (x0 + x1) / 2.0, x1].iter().all(|&x| env.dark_to(x, y - 60.0 * s, 0.9));
+            if dark {
+                out.push((y, x0, x1));
+            }
+        }
+        out
+    }
+
+    /// The ledge under the cat still exists (windows move and close); follows small moves.
+    fn check_ledge(&mut self, env: &Env) -> bool {
+        let Ground::Ledge { y, .. } = self.ground else { return true };
+        let x = self.pos.0;
+        let found = self
+            .ledges(env)
+            .into_iter()
+            .filter(|&(ly, x0, x1)| (ly - y).abs() < 40.0 * self.scale && x >= x0 - 40.0 * self.scale && x <= x1 + 40.0 * self.scale)
+            .min_by(|a, b| (a.0 - y).abs().total_cmp(&(b.0 - y).abs()));
+        match found {
+            Some((ly, x0, x1)) => {
+                self.ground = Ground::Ledge { y: ly, x0, x1 };
+                self.pos = (x.clamp(x0, x1), ly);
+                self.goal.1 = ly;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Starts a leap to `to`, landing on `land`, then carrying on as `then`.
+    fn jump_to(&mut self, now: f64, to: (f32, f32), land: Ground, then: State) {
+        let dist = (to.0 - self.pos.0).hypot(to.1 - self.pos.1);
+        let up = (self.pos.1 - to.1).max(0.0);
+        let secs = 0.45 + 0.0005 * dist as f64;
+        let height = 0.5 * up + 50.0 * self.scale + 0.1 * dist;
+        if (to.0 - self.pos.0).abs() > 2.0 {
+            self.left = to.0 < self.pos.0;
+        }
+        self.v = 0.0;
+        self.jump = Some(Jump { from: self.pos, to, start: now, secs, height, land, then });
+        self.clip = Clip::Jump;
+        self.clip_start = now;
+        self.set(State::Jump, now, secs);
+    }
+
+    /// A dark landing spot below, for hopping down off a ledge.
+    fn floor_below(&mut self, env: &Env) -> (f32, f32) {
+        let (m, s) = (env.mon, self.scale);
+        for _ in 0..8 {
+            let dx = self.dir() * (60.0 + 160.0 * self.unit()) * s;
+            let dy = (220.0 + 300.0 * self.unit()) * s;
+            let p = self.feet_bounds(env, (self.pos.0 + dx, self.pos.1 + dy));
+            if p.1 > self.pos.1 + 60.0 * s && env.dark(p.0, p.1 - 60.0 * s) {
+                return p;
+            }
+        }
+        self.feet_bounds(env, (self.pos.0, m.bottom as f32))
+    }
+
+    /// Picks a ledge to leap onto: from the floor, via a launch spot below it;
+    /// from a ledge, straight across to another one within reach.
+    fn pick_ledge(&mut self, env: &Env) -> bool {
+        let s = self.scale;
+        let mut ledges = self.ledges(env);
+        if let Ground::Ledge { y, .. } = self.ground {
+            ledges.retain(|l| (l.0 - y).abs() > 8.0);
+        }
+        if ledges.is_empty() {
+            return false;
+        }
+        let start = (self.unit() * ledges.len() as f32) as usize;
+        for k in 0..ledges.len() {
+            let (y, x0, x1) = ledges[(start + k) % ledges.len()];
+            let land = Ground::Ledge { y, x0, x1 };
+            match self.ground {
+                Ground::Floor => {
+                    let x = x0 + (x1 - x0) * (0.2 + 0.6 * self.unit());
+                    let side = if self.pos.0 < x { -1.0 } else { 1.0 };
+                    let launch = self.feet_bounds(env, (x + side * 180.0 * s, y + 260.0 * s));
+                    let rise = launch.1 - y;
+                    if rise > 80.0 * s && rise < LEAP_UP * s && env.dark(launch.0, launch.1 - 60.0 * s) {
+                        self.goal = launch;
+                        self.leap = Some(((x, y), land));
+                        return true;
+                    }
+                }
+                Ground::Ledge { .. } => {
+                    let x = (self.pos.0 + self.dir() * 300.0 * s).clamp(x0, x1);
+                    let (dx, dy) = ((x - self.pos.0).abs(), y - self.pos.1);
+                    if dx > 100.0 * s && dx < LEAP_ACROSS * s && dy > -LEAP_UP * s && dy < 650.0 * s {
+                        self.leap = Some(((x, y), land));
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// A window to slip behind: tall and wide enough to hide the cat, with room
+    /// beside it in the dark. Sets the entry spot as the goal.
+    fn pick_cover(&mut self, env: &Env) -> bool {
+        let (m, s) = (env.mon, self.scale);
+        let n = env.wins.len();
+        if n == 0 {
+            return false;
+        }
+        let start = (self.unit() * n as f32) as usize;
+        for k in 0..n {
+            let i = (start + k) % n;
+            let (r, play) = env.wins[i];
+            let (lo, hi) = (r.top as f32 + 175.0 * s, (r.bottom as f32 - 8.0 * s).min(m.bottom as f32 - 6.0 * s));
+            if !play || hi <= lo || ((r.right - r.left) as f32) < 360.0 * s {
+                continue;
+            }
+            let y = lo + (hi - lo) * self.unit();
+            let side = if self.pos.0 < (r.left + r.right) as f32 / 2.0 { -1.0 } else { 1.0 };
+            let edge = if side < 0.0 { r.left as f32 } else { r.right as f32 };
+            let entry = (edge + side * 130.0 * s, y);
+            let room = entry.0 > m.left as f32 + 60.0 * s && entry.0 < m.right as f32 - 60.0 * s;
+            // The edge it disappears behind must be in view.
+            let seen = !env.covered(i, edge - side, y - 10.0 * s) && !env.covered(i, edge - side, y - 120.0 * s);
+            if room && seen && env.dark(entry.0, y - 60.0 * s) && env.dark(edge + side * 40.0 * s, y - 100.0 * s) {
+                self.goal = entry;
+                self.cover = Some(Cover { rect: r, side, through: self.unit() < 0.4 });
+                return true;
+            }
+        }
+        false
+    }
+
+    /// A window side edge to scratch, standing up beside it in the dark.
+    fn pick_scratch(&mut self, env: &Env) -> bool {
+        let (m, s) = (env.mon, self.scale);
+        let reach = (cf::SCRATCH_X - ANCHOR.0) * s;
+        let n = env.wins.len();
+        if n == 0 {
+            return false;
+        }
+        let start = (self.unit() * n as f32) as usize;
+        for k in 0..n {
+            let i = (start + k) % n;
+            let (r, play) = env.wins[i];
+            let (lo, hi) = (r.top as f32 + 130.0 * s, (r.bottom as f32 + 40.0 * s).min(m.bottom as f32 - 6.0 * s));
+            if !play || hi <= lo {
+                continue;
+            }
+            let y = lo + (hi - lo) * self.unit();
+            let side = if self.pos.0 < (r.left + r.right) as f32 / 2.0 { -1.0 } else { 1.0 };
+            let edge = if side < 0.0 { r.left as f32 } else { r.right as f32 };
+            let feet = (edge + side * reach, y);
+            let room = feet.0 > m.left as f32 + 80.0 * s && feet.0 < m.right as f32 - 80.0 * s;
+            // The claws must land on a part of the edge that's in view.
+            let seen = !env.covered(i, edge - side, y - 110.0 * s) && !env.covered(i, edge - side, y - 70.0 * s);
+            if room && seen && env.dark(feet.0, y - 60.0 * s) {
+                self.goal = feet;
+                self.scratch = Some((r, 0.0));
+                return true;
+            }
+        }
+        false
+    }
+
     /// Moves toward the goal, speeding up toward `top` and braking to arrive.
     /// Advances the leg cycle by the distance covered. True on arrival.
     fn drive(&mut self, dt: f32, top: f32) -> bool {
@@ -544,6 +834,9 @@ impl Critter {
     }
 
     fn spawn_fly(&mut self, now: f64, env: &Env) {
+        if windows_only() {
+            return;
+        }
         let (m, s) = (env.mon, self.scale);
         for _ in 0..10 {
             let p = (
@@ -652,7 +945,7 @@ impl Critter {
 
         let on_screen = self.pos.0 > env.mon.left as f32 && self.pos.0 < env.mon.right as f32;
         let can_startle = match self.state {
-            State::Startle | State::Flee | State::Pounce => false,
+            State::Startle | State::Flee | State::Pounce | State::Jump | State::Hidden | State::Sneak => false,
             State::Leave | State::Wander => on_screen,
             _ => true,
         };
@@ -681,18 +974,61 @@ impl Critter {
             return None;
         }
 
+        let recheck = matches!(self.ground, Ground::Ledge { .. }) && now - self.ledge_checked > 0.3;
+        if recheck {
+            self.ledge_checked = now;
+        }
+        if recheck && self.state != State::Jump && !self.check_ledge(env) {
+            // The window under it moved away or closed: drop to the floor.
+            let to = self.floor_below(env);
+            self.jump_to(now, to, Ground::Floor, State::Idle);
+        }
+
         let mut lift = 0.0;
         match self.state {
             State::Wander => {
                 self.vary_cruise(now);
                 let arrived = self.drive(dt, self.cruise);
                 self.gait(now);
+                if let Some(c) = self.cover
+                    && ((c.side < 0.0 && self.pos.0 > c.rect.right as f32) || (c.side > 0.0 && self.pos.0 < c.rect.left as f32))
+                {
+                    // Out the far side: it shows again.
+                    self.cover = None;
+                }
                 if arrived {
+                    self.cover = None;
                     let groom = self.unit() < 0.3;
                     self.set_random(State::Idle, now, 2.0, 4.0);
                     self.play(if groom { Clip::Groom } else { Clip::Sit }, now);
-                } else if now >= self.hunt_after && self.nearest_fly(900.0 * s).is_some() {
+                } else if self.ground == Ground::Floor && self.cover.is_none() && now >= self.hunt_after && self.nearest_fly(900.0 * s).is_some() {
                     self.set(State::Idle, now, 0.0);
+                }
+            }
+            State::Idle if matches!(self.ground, Ground::Ledge { .. }) => {
+                self.v = 0.0;
+                let fly = now >= self.hunt_after && self.nearest_fly(1200.0 * s).is_some();
+                let rim = resting && !windows_only() && now >= self.rim_after && self.rim_seat(env).is_some();
+                if fly || rim || now - self.born > VISIT_SECS {
+                    // Hop down to hunt, visit the light or leave.
+                    let to = self.floor_below(env);
+                    self.jump_to(now, to, Ground::Floor, State::Idle);
+                } else if now >= self.until {
+                    let r = self.unit();
+                    if r < 0.45 {
+                        if let Ground::Ledge { y, x0, x1 } = self.ground {
+                            self.goal = (x0 + (x1 - x0) * self.unit(), y);
+                            self.cruise_until = 0.0;
+                            self.set(State::Wander, now, 0.0);
+                        }
+                    } else if r < 0.75 && self.pick_ledge(env) {
+                        if let Some((to, land)) = self.leap.take() {
+                            self.jump_to(now, to, land, State::Idle);
+                        }
+                    } else {
+                        let to = self.floor_below(env);
+                        self.jump_to(now, to, Ground::Floor, State::Idle);
+                    }
                 }
             }
             State::Idle => {
@@ -705,18 +1041,160 @@ impl Critter {
                     self.prey = Some(f);
                     self.plan_attack();
                     self.set(State::Hunt, now, 0.0);
-                } else if resting && let Some(g) = self.rim_seat(env) {
+                } else if resting && !windows_only() && now >= self.rim_after && let Some(g) = self.rim_seat(env) {
                     self.goal = g;
+                    self.reaches = 0;
                     self.set(State::Approach, now, 0.0);
                 } else if now >= self.until {
-                    match self.wander_goal(env) {
-                        Some(g) => {
-                            self.goal = g;
-                            self.cruise_until = 0.0;
-                            self.set(State::Wander, now, 0.0);
+                    // Play with the windows now and then; otherwise stroll.
+                    let r = match debug_cat() {
+                        "climb" => 0.1,
+                        "hide" => 0.4,
+                        "scratch" => 0.5,
+                        _ => self.unit(),
+                    };
+                    if r < 0.3 && self.pick_ledge(env) {
+                        self.cruise_until = 0.0;
+                        self.set(State::Climb, now, 0.0);
+                    } else if r < 0.45 && self.pick_cover(env) {
+                        self.cruise_until = 0.0;
+                        self.set(State::Sneak, now, 0.0);
+                    } else if r < 0.6 && self.scratches < 3 && self.pick_scratch(env) {
+                        self.cruise_until = 0.0;
+                        self.set(State::ToScratch, now, 0.0);
+                    } else {
+                        match self.wander_goal(env) {
+                            Some(g) => {
+                                self.goal = g;
+                                self.cruise_until = 0.0;
+                                self.set(State::Wander, now, 0.0);
+                            }
+                            None => self.until = now + 2.0,
                         }
-                        None => self.until = now + 2.0,
                     }
+                }
+            }
+            State::Climb => {
+                self.vary_cruise(now);
+                let arrived = self.drive(dt, self.cruise.max(WALK));
+                self.gait(now);
+                if arrived {
+                    match self.leap.take() {
+                        Some((to, land)) => self.jump_to(now, to, land, State::Idle),
+                        None => self.set(State::Idle, now, 1.0),
+                    }
+                }
+            }
+            State::Jump => {
+                self.play(Clip::Jump, now);
+                if let Some(j) = &self.jump {
+                    let u = (((now - j.start) / j.secs) as f32).clamp(0.0, 1.0);
+                    let e = u * u * (3.0 - 2.0 * u);
+                    self.pos = (j.from.0 + (j.to.0 - j.from.0) * e, j.from.1 + (j.to.1 - j.from.1) * e);
+                    lift = j.height * (std::f32::consts::PI * u).sin();
+                }
+                if now >= self.until
+                    && let Some(j) = self.jump.take()
+                {
+                    self.pos = j.to;
+                    self.ground = j.land;
+                    match j.then {
+                        State::Flee => {
+                            self.goal = self.exit_goal(env, px);
+                            self.set(State::Flee, now, 0.0);
+                        }
+                        then => {
+                            self.set_random(then, now, 0.6, 1.5);
+                            self.play(Clip::Sit, now);
+                        }
+                    }
+                }
+            }
+            State::Sneak => {
+                // Walk to the entry spot, then in behind the window until fully hidden.
+                let Some(c) = self.cover else {
+                    self.set(State::Idle, now, 1.0);
+                    return Some(self.scene(now, 0.0));
+                };
+                let edge = if c.side < 0.0 { c.rect.left as f32 } else { c.rect.right as f32 };
+                let inside = edge - c.side * 120.0 * s;
+                let arrived = self.drive(dt, if (self.goal.0 - inside).abs() < 1.0 { 55.0 } else { WALK });
+                self.gait(now);
+                if arrived {
+                    if (self.goal.0 - inside).abs() < 1.0 {
+                        self.set_random(State::Hidden, now, 1.5, 2.0);
+                        self.play(Clip::Sit, now);
+                    } else {
+                        self.goal = (inside, self.pos.1);
+                    }
+                }
+            }
+            State::Hidden => {
+                let Some(c) = self.cover else {
+                    self.set(State::Idle, now, 1.0);
+                    return Some(self.scene(now, 0.0));
+                };
+                if now >= self.until {
+                    if c.through {
+                        // Slip along behind it and come out the far side.
+                        let far = if c.side < 0.0 { c.rect.right as f32 + 160.0 * s } else { c.rect.left as f32 - 160.0 * s };
+                        self.goal = self.feet_bounds(env, (far, self.pos.1));
+                        self.cruise_until = 0.0;
+                        self.set(State::Wander, now, 0.0);
+                    } else {
+                        // Creep up to the edge until the face shows.
+                        let edge = if c.side < 0.0 { c.rect.left as f32 } else { c.rect.right as f32 };
+                        self.goal = (edge - c.side * 22.0 * s, self.pos.1);
+                        // No deadline while it creeps up; the look-out gets one on arrival.
+                        self.set(State::Peek, now, f64::INFINITY);
+                    }
+                }
+            }
+            State::Peek => {
+                let Some(c) = self.cover else {
+                    self.set(State::Idle, now, 1.0);
+                    return Some(self.scene(now, 0.0));
+                };
+                if self.until.is_infinite() {
+                    // Still creeping up to the edge.
+                    self.play(Clip::Stalk, now);
+                    if self.drive(dt, STALK) {
+                        self.left = c.side < 0.0;
+                        self.set_random(State::Peek, now, 2.0, 1.5);
+                    }
+                } else {
+                    self.left = c.side < 0.0;
+                    self.play(Clip::Stare, now);
+                    if now >= self.until {
+                        // Out it comes.
+                        let edge = if c.side < 0.0 { c.rect.left as f32 } else { c.rect.right as f32 };
+                        self.goal = self.feet_bounds(env, (edge + c.side * 170.0 * s, self.pos.1));
+                        self.cover = None;
+                        self.cruise_until = 0.0;
+                        self.set(State::Wander, now, 0.0);
+                    }
+                }
+            }
+            State::ToScratch => {
+                self.vary_cruise(now);
+                let arrived = self.drive(dt, self.cruise.max(WALK));
+                self.gait(now);
+                if arrived {
+                    if let Some((r, _)) = self.scratch {
+                        self.left = self.pos.0 > (r.left + r.right) as f32 / 2.0;
+                        self.scratch = Some((r, now));
+                        self.scratches += 1;
+                    }
+                    self.set_random(State::Scratch, now, 2.0, 1.5);
+                }
+            }
+            State::Scratch => {
+                self.play(Clip::Scratch, now);
+                if now >= self.until {
+                    self.scratch = None;
+                    let groom = self.unit() < 0.5;
+                    self.set_random(State::Idle, now, 1.5, 2.0);
+                    self.play(if groom { Clip::Groom } else { Clip::Sit }, now);
                 }
             }
             State::Approach => match self.rim_seat(env).filter(|_| resting) {
@@ -743,7 +1221,13 @@ impl Critter {
                     self.set(State::Idle, now, 1.5);
                     self.play(Clip::Sit, now);
                 } else if now >= self.until {
-                    if self.state == State::Stare {
+                    if self.state == State::Stare && self.reaches >= 2 + (self.unit() * 3.0) as u32 {
+                        // Enough of the light for now: it wanders off for a while.
+                        self.rim_after = now + 25.0 + 20.0 * self.unit() as f64;
+                        self.set(State::Idle, now, 0.5);
+                        self.play(Clip::Sit, now);
+                    } else if self.state == State::Stare {
+                        self.reaches += 1;
                         self.set(State::Reach, now, Clip::Reach.secs());
                     } else {
                         self.set_random(State::Stare, now, 3.0, 3.0);
@@ -834,15 +1318,24 @@ impl Critter {
                 if now >= self.until {
                     self.misses = 0;
                     self.prey = None;
+                    // Full for a bit: time for other games before the next hunt.
+                    self.hunt_after = now + 10.0 + 10.0 * self.unit() as f64;
                     self.set_random(State::Idle, now, 1.0, 2.0);
                     self.play(Clip::Sit, now);
                 }
             }
             State::Startle => {
                 self.play(Clip::Startle, now);
+                self.cover = None;
+                self.scratch = None;
                 if now >= self.until {
-                    self.goal = self.exit_goal(env, px);
-                    self.set(State::Flee, now, 0.0);
+                    if self.ground == Ground::Floor {
+                        self.goal = self.exit_goal(env, px);
+                        self.set(State::Flee, now, 0.0);
+                    } else {
+                        let to = self.floor_below(env);
+                        self.jump_to(now, to, Ground::Floor, State::Flee);
+                    }
                 }
             }
             State::Flee | State::Leave => {
@@ -916,9 +1409,23 @@ impl Critter {
     fn scene(&self, now: f64, lift: f32) -> Scene {
         let (first, _, _, _) = self.clip.spec();
         let frame = first + self.clip_frame(now);
+        // Behind a window only the part beyond its edge shows.
+        let clip = self.cover.map(|c| {
+            let behind_left = self.pos.0 < (c.rect.left + c.rect.right) as f32 / 2.0;
+            if behind_left { (f32::MIN, c.rect.left as f32) } else { (c.rect.right as f32, f32::MAX) }
+        });
+        // A scratched window trembles, in bursts that follow the paw strokes.
+        let shake = self.scratch.filter(|_| self.state == State::Scratch).map(|(rect, t0)| {
+            let t = (now - t0) as f32;
+            let tau = std::f32::consts::TAU;
+            let fade = (t / 0.15).min(1.0) * (((self.until - now) as f32) / 0.15).clamp(0.0, 1.0);
+            let a = SHAKE * self.scale * fade * (0.55 + 0.45 * (tau * 2.0 * t).sin());
+            ShakeDraw { rect, dx: a * (tau * 16.0 * t).sin(), dy: 0.4 * a * (tau * 11.0 * t + 1.0).sin(), id: self.scratches }
+        });
         let mut scene = Scene {
-            cat: Some(CritterDraw { x: self.pos.0, y: self.pos.1 - lift, scale: self.scale, frame, flip: self.left }),
+            cat: Some(CritterDraw { x: self.pos.0, y: self.pos.1 - lift, scale: self.scale, frame, flip: self.left, clip }),
             flies: [None; MAX_FLIES],
+            shake,
         };
         // Swallowed fireflies stay in the list (the cat tracks its prey by index) but aren't drawn.
         for (slot, f) in scene.flies.iter_mut().zip(self.flies.iter().filter(|f| !f.gone)) {

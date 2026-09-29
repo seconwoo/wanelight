@@ -9,7 +9,9 @@
 //!
 //! Spooky mode's cat is a visual underneath the mask, so it is dimmed (and
 //! capture-excluded) along with everything else. Its fireflies make their own
-//! light, so they sit above the mask.
+//! light, so they sit above the mask. A window the cat scratches "shakes": a
+//! copy of it from the last captured frame is shown jittering under the cat;
+//! the real window is never touched.
 //!
 //! The window never covers the whole monitor: Windows treats any visible
 //! topmost window that does as a fullscreen app, which stops the auto-hide
@@ -19,6 +21,7 @@ use std::sync::{Once, OnceLock};
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::DirectComposition::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
@@ -103,13 +106,30 @@ struct Sprite {
     frame: Option<usize>,
 }
 
+/// A copy of a scratched window, made when a scratch starts.
+struct Shake {
+    visual: IDCompositionVisual,
+    swap: Option<IDXGISwapChain1>,
+    /// Scratch id of the copy, and its rect relative to the monitor.
+    id: Option<u32>,
+    at: RECT,
+}
+
 /// Spooky mode's cat and fireflies.
 struct Sprites {
+    device: ID3D11Device,
+    factory: IDXGIFactory2,
     atlas: ID3D11Texture2D,
+    /// Clips the cat while it hides behind a window.
+    cat_box: IDCompositionVisual,
     cat: Sprite,
     flies: [Sprite; MAX_FLIES],
+    shake: Shake,
     scene: Scene,
 }
+
+/// Everything, for clips that show all.
+const NO_CLIP: D2D_RECT_F = D2D_RECT_F { left: -1.0e7, top: -1.0e7, right: 1.0e7, bottom: 1.0e7 };
 
 const HIDDEN: Matrix3x2 = Matrix3x2 { M11: 0.0, M12: 0.0, M21: 0.0, M22: 0.0, M31: 0.0, M32: 0.0 };
 
@@ -187,12 +207,13 @@ impl Overlay {
                 log!("overlay: no spooky sprites: {}", e.message());
                 None
             });
-            // The mask goes in front of the cat, so the cat is dimmed with everything
-            // else; the glowing fireflies go in front of the mask.
+            // Back to front: a shaking window copy, the cat, the mask (so both are
+            // dimmed with everything else), then the glowing fireflies.
             match &sprites {
                 Some(sp) => {
-                    root.AddVisual(&sp.cat.visual, false, None)?;
-                    root.AddVisual(&visual, true, &sp.cat.visual)?;
+                    root.AddVisual(&sp.shake.visual, false, None)?;
+                    root.AddVisual(&sp.cat_box, true, &sp.shake.visual)?;
+                    root.AddVisual(&visual, true, &sp.cat_box)?;
                     for f in &sp.flies {
                         root.AddVisual(&f.visual, true, &visual)?;
                     }
@@ -293,13 +314,25 @@ impl Overlay {
     }
 
     /// Shows spooky mode's cat and fireflies. Only swaps sprites whose frame
-    /// changed; otherwise just moves the visuals.
-    pub fn set_scene(&mut self, scene: &Scene) -> Result<()> {
+    /// changed; otherwise just moves the visuals. `desktop` is the monitor's last
+    /// captured frame, used to copy a window the cat starts scratching.
+    pub fn set_scene(&mut self, scene: &Scene, desktop: Option<&ID3D11Texture2D>) -> Result<()> {
         let Some(sp) = &mut self.sprites else { return Ok(()) };
         if sp.scene == *scene {
             return Ok(());
         }
         sp.scene = *scene;
+        match (scene.shake, desktop) {
+            (Some(sh), Some(tex)) if sp.shake.id != Some(sh.id) => {
+                sp.shake.id = Some(sh.id);
+                if let Err(e) = sp.shake.copy(&sp.device, &sp.factory, &self.context, tex, sh.rect, self.mon) {
+                    log!("overlay: cannot copy the scratched window: {}", e.message());
+                    sp.shake.drop_copy();
+                }
+            }
+            (None, _) if sp.shake.id.is_some() => sp.shake.drop_copy(),
+            _ => {}
+        }
         if let Some(d) = scene.cat {
             sp.cat.show(&self.context, &sp.atlas, d.frame, (0, 0), (critter::FRAME_W, critter::FRAME_H))?;
         }
@@ -330,7 +363,24 @@ impl Overlay {
             }
             None => HIDDEN,
         };
+        let clip = match sp.scene.cat.and_then(|d| d.clip) {
+            Some((lo, hi)) => D2D_RECT_F { left: (lo - wx).max(-1.0e7), top: -1.0e7, right: (hi - wx).min(1.0e7), bottom: 1.0e7 },
+            None => NO_CLIP,
+        };
+        let shake = match (sp.scene.shake, &sp.shake.swap) {
+            (Some(sh), Some(_)) => Matrix3x2 {
+                M11: 1.0,
+                M12: 0.0,
+                M21: 0.0,
+                M22: 1.0,
+                M31: (self.mon.left + sp.shake.at.left) as f32 - wx + sh.dx,
+                M32: (self.mon.top + sp.shake.at.top) as f32 - wy + sh.dy,
+            },
+            _ => HIDDEN,
+        };
         unsafe {
+            sp.cat_box.SetClip2(&clip)?;
+            sp.shake.visual.SetTransform2(&shake)?;
             sp.cat.visual.SetTransform2(&cat)?;
             for (sprite, fly) in sp.flies.iter().zip(&sp.scene.flies) {
                 let m = match fly {
@@ -416,6 +466,78 @@ impl Sprite {
     }
 }
 
+impl Shake {
+    /// Copies `rect` (screen px) from the captured frame into a fresh swap chain.
+    fn copy(
+        &mut self,
+        device: &ID3D11Device,
+        factory: &IDXGIFactory2,
+        ctx: &ID3D11DeviceContext,
+        tex: &ID3D11Texture2D,
+        rect: RECT,
+        mon: RECT,
+    ) -> Result<()> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { tex.GetDesc(&mut desc) };
+        let at = RECT {
+            left: (rect.left - mon.left).max(0),
+            top: (rect.top - mon.top).max(0),
+            right: (rect.right - mon.left).min(desc.Width as i32),
+            bottom: (rect.bottom - mon.top).min(desc.Height as i32),
+        };
+        if at.right - at.left < 8 || at.bottom - at.top < 8 {
+            self.drop_copy();
+            return Ok(());
+        }
+        let (w, h) = ((at.right - at.left) as u32, (at.bottom - at.top) as u32);
+        // Same format as the capture: FP16 frames are scRGB, which composition shows as is.
+        let format = desc.Format;
+        if format != DXGI_FORMAT_B8G8R8A8_UNORM && format != DXGI_FORMAT_R16G16B16A16_FLOAT {
+            self.drop_copy();
+            return Ok(());
+        }
+        unsafe {
+            let desc = DXGI_SWAP_CHAIN_DESC1 {
+                Width: w,
+                Height: h,
+                Format: format,
+                Stereo: false.into(),
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                BufferCount: 2,
+                Scaling: DXGI_SCALING_STRETCH,
+                SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                Flags: 0,
+            };
+            let swap = factory.CreateSwapChainForComposition(device, &desc, None)?;
+            if format == DXGI_FORMAT_R16G16B16A16_FLOAT {
+                // Captured FP16 frames are linear scRGB; say so, or they show far too dark.
+                swap.cast::<IDXGISwapChain3>()?.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709)?;
+            }
+            let back: ID3D11Texture2D = swap.GetBuffer(0)?;
+            let src = D3D11_BOX { left: at.left as u32, top: at.top as u32, front: 0, right: at.right as u32, bottom: at.bottom as u32, back: 1 };
+            ctx.CopySubresourceRegion(&back, 0, 0, 0, 0, tex, 0, Some(&src));
+            swap.Present(0, DXGI_PRESENT(0)).ok()?;
+            self.visual.SetContent(&swap)?;
+            self.swap = Some(swap);
+        }
+        self.at = at;
+        Ok(())
+    }
+
+    /// Frees the copy once the scratching stops.
+    fn drop_copy(&mut self) {
+        self.id = None;
+        if self.swap.take().is_some() {
+            unsafe {
+                let _ = self.visual.SetContent(None::<&windows::core::IUnknown>);
+                let _ = self.visual.SetTransform2(&HIDDEN);
+            }
+        }
+    }
+}
+
 impl Sprites {
     fn new(gpu: &Gpu, dcomp: &IDCompositionDevice, factory: &IDXGIFactory2) -> Result<Option<Sprites>> {
         let Some(a) = atlas() else { return Ok(None) };
@@ -441,7 +563,24 @@ impl Sprites {
         let cat = Sprite::new(gpu, dcomp, factory, critter::FRAME_W, critter::FRAME_H)?;
         let fly = || Sprite::new(gpu, dcomp, factory, critter::FLY, critter::FLY);
         let flies = [fly()?, fly()?, fly()?];
-        Ok(Some(Sprites { atlas, cat, flies, scene: Scene::default() }))
+        let (cat_box, shake) = unsafe {
+            let cat_box = dcomp.CreateVisual()?;
+            cat_box.AddVisual(&cat.visual, false, None)?;
+            let shake = dcomp.CreateVisual()?;
+            shake.SetTransform2(&HIDDEN)?;
+            (cat_box, shake)
+        };
+        let shake = Shake { visual: shake, swap: None, id: None, at: RECT::default() };
+        Ok(Some(Sprites {
+            device: gpu.device.clone(),
+            factory: factory.clone(),
+            atlas,
+            cat_box,
+            cat,
+            flies,
+            shake,
+            scene: Scene::default(),
+        }))
     }
 }
 

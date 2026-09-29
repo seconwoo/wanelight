@@ -24,7 +24,7 @@ The user normally has an agent running from `target\release`. Don't kill it whil
   - `--selftest --map` is read-only and prints which parts of the screen are changing.
   - `--panel-probe [--brief]` prints the panels panel mode would pick.
   - `--test-surface [secs]` shows a white square that you can watch dim.
-- Spooky mode's cat is drawn inside the overlay, so it is capture-excluded too. To grab it on screen, start the test copy with `--no-capture-exclusion` and pin the pointer with `WANELIGHT_DEBUG_POINTER`. With debugging on, the log records the cat's state changes (`cat: Hunt -> Wiggle`).
+- Spooky mode's cat is drawn inside the overlay, so it is capture-excluded too. To grab it on screen, start the test copy with `--no-capture-exclusion` and pin the pointer with `WANELIGHT_DEBUG_POINTER`. With debugging on, the log records the cat's state changes (`cat: Hunt -> Wiggle`). `WANELIGHT_DEBUG_CAT=windows` leaves out fireflies and torch visits so the cat only plays with windows; `climb`, `hide` or `scratch` makes it pick that game every time. With `--no-capture-exclusion` the capture also sees the overlay, so a scratched window's shaking copy looks dimmed twice; that's expected.
 - Live screen content confuses before/after comparisons. Use `--test-surface` or another controlled window, not whatever is on screen.
 - Stop test instances when you're done: `WANELIGHT_DATA_DIR=<same dir> wanelight.exe --quit`.
 
@@ -39,7 +39,7 @@ winmap.rs   z-ordered window map: foreground, taskbar, per-app rules
 panels.rs   UI Automation on a background MTA thread, used by torch panel mode
 overlay.rs  DirectComposition overlay at grid resolution, scaled x16, capture-excluded; cat sprite layer under the mask
 spook.rs    spooky mode: torch flicker, schedules the cat's visits
-critter.rs  spooky mode's cat and fireflies: behavior, gait, hunting, sprite frame table
+critter.rs  spooky mode's cat and fireflies: behavior, gait, hunting, window play
 color.rs    full-screen color matrix (Magnification API) for deeper blacks
 mod.rs      agent loop, tiers (away, display off, pixel refresh), input tracking, tray, IPC
 ddc.rs      DDC/CI brightness worker with a crash-safe restore file
@@ -58,6 +58,7 @@ ddc.rs      DDC/CI brightness worker with a crash-safe restore file
 - **The CPU budget is under 1% of a core.** Don't clone per frame, recompute only when inputs change, and keep the frame timer adaptive (16 ms while animating, 33 ms while watching, stopped otherwise).
 - **Hardening tweaks must stay reversible.** Record the previous values before changing anything, and never apply tweaks to the user's system as part of testing.
 - **Restore DDC brightness on exit and after a crash.**
+- **Spooky mode never touches other windows.** The cat walks on, hides behind and scratches windows only in the overlay; a scratched window's shake is a copy from the last captured frame. It never moves, clicks or reads other windows.
 - **The color matrix is not excluded from capture.** Desktop Duplication sees it, so the model measures what the panel shows. Never make the matrix depend on captured brightness, or it feeds back on itself. Windows resets the matrix when the process exits, even on a crash.
 
 ## Conventions
