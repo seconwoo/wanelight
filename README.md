@@ -1,6 +1,7 @@
 # Wanelight
 
-OLED burn-in protection for Windows 10/11.
+**OLED burn-in protection for Windows 10/11.** A small tray app that keeps the pixels you
+aren't looking at dark, so your panel lasts longer.
 
 Burn-in comes from bright pixels that stay the same for hours. Wanelight keeps them dark
 with two main tools:
@@ -9,7 +10,23 @@ with two main tools:
 - **Deeper blacks** turns the dark grays of every app into true black, so those pixels switch off.
 
 Both switch on and off with a shortcut or from the tray. Around them, Wanelight rests the
-screen when you step away and lets the panel run its care cycle.
+screen when you step away and lets the panel run its care cycle. And if you'd like some
+company in the dark, **spooky mode** brings a shadow cat along.
+
+- **One small exe.** No installer, no services, no drivers.
+- **Never in the way.** The overlay is click-through, never takes focus, and never shows up in screenshots or streams.
+- **Watching isn't being away.** The screen only fades when you've stopped using it *and* nothing on it moves, so a video never goes dark.
+- **Light on resources.** About 0.3% of one CPU core and 50 MB of RAM.
+- **Everything is reversible.** Every Windows setting it changes can be switched back, and monitor brightness comes back even after a crash.
+
+## Quick start
+
+1. Build `wanelight.exe` (see [Build](#build)).
+2. Run it. The Wanelight icon appears in the tray.
+3. Press **Ctrl+Alt+Shift+T** to turn Torch on, and again to turn it off.
+4. Click the tray icon to open the settings. Right-click it for the menu.
+
+To stop Wanelight, choose **Exit** in the tray menu or **Exit Wanelight** at the bottom of the settings window. Either one stops the agent and closes the settings window.
 
 ## See it
 
@@ -27,6 +44,22 @@ A flashlight for your screen: only a soft circle around the pointer stays lit. T
 Only the panel under the pointer stays lit. Start typing and only the text box does.
 
 <p align="center"><img src="docs/torch-panel.svg" width="800" alt="Torch panel style: the lit panel follows the pointer from chat to sidebar to side pane, then only the message box stays lit while typing"></p>
+
+### Spooky mode
+
+A bonus for Torch. Everything outside the light goes almost black, and now and then the
+torch flickers like a failing bulb. Then a small shadow cat drops by.
+
+It wanders the dark and hunts glowing fireflies. It strolls along the tops of your windows,
+hides behind them and peeks out, and sometimes stops to scratch one. When the pointer rests,
+it creeps up to the edge of the light and stares. Come at it, and it bolts. It may also have
+a secret or two.
+
+<p align="center"><img src="docs/spooky.svg" width="800" alt="Spooky mode: the torch flickers, then a shadow cat walks in, pounces on a glowing firefly, creeps up to the edge of the light and runs off when the pointer comes at it"></p>
+
+Turn it on under **Torch → Spooky mode**. The cat only plays in Wanelight's own overlay: it
+never moves, clicks or reads your windows, and a scratched window's shake is only a picture
+of it. Like the rest of the overlay, the cat doesn't show up in screenshots.
 
 ### Deeper blacks
 
@@ -51,6 +84,7 @@ The settings window shows how much light each part of each screen has given off,
 | Feature | Behaviour |
 |---|---|
 | **Torch** *(off until you turn it on)* | Only your focus stays lit, and everything else dims by 60%. You choose what stays lit: the window you're using plus a little around the pointer; a circle around the pointer; or the **panel** under the pointer (sidebar, main area, side pane). In panel style, typing lights only the text box. Panels are found through UI Automation, which reads layout only, never text. Toggle with **Ctrl+Alt+Shift+T**, from Home or from the tray. |
+| **Spooky mode** *(off until you turn it on)* | Torch with a flicker, fireflies and a shadow cat. The rest of the screen dims by 95% (adjustable from 50 to 98%). Everything is drawn in the overlay, so nothing outside Wanelight is touched. |
 | **Deeper blacks** *(off until you turn it on)* | A full-screen colour matrix, the same mechanism as Windows colour filters, turns grays up to #262626 (adjustable) into true black and leaves whites alone. Toggle it from Home, the tray or a shortcut you set. It doesn't work while Magnifier or colour filters are on. |
 | **Fade when you step away** | No input *and* a still screen for 5 minutes fades the screen down. Any input restores it at once. |
 | **Turn displays off** | After 20 minutes away, the displays go to sleep, unless audio is playing. |
@@ -71,19 +105,21 @@ Measured on a 3440×1440 display: about 3.5 ms per sample, around 0.3% of one CP
 
 ## Settings
 
-Open the settings window from the tray icon, or by running `wanelight.exe` again.
+Open the settings window by clicking the tray icon, or by running `wanelight.exe` again.
+Changes apply as you make them, so there's no Save button.
 
 | Page | What's there |
 |---|---|
 | **Home** | Whether protection is on, Pause, Torch and Deeper blacks, your displays, panel rest and start with Windows |
-| **Torch** | What stays lit, how much the rest dims, the shortcut |
+| **Torch** | What stays lit, how much the rest dims, the shortcut, spooky mode |
 | **Deeper blacks** | How dark counts as black, with a before and after preview, and the shortcut |
 | **Away and rest** | Fading, turning displays off, monitor brightness, panel rest |
 | **Apps** | Apps never to dim or recolour. Pick from open apps or type a name. |
 | **Wear map** | Light given off, or saved, per part of each screen |
 | **Windows setup** | The reversible Windows settings |
 
-To change a shortcut, click it and press the new keys.
+To change a shortcut, click it and press the new keys. **Exit Wanelight**, at the bottom of
+the sidebar, stops Wanelight and closes the window.
 
 ## Build
 
@@ -107,7 +143,7 @@ This starts the tray agent; running it again opens the settings window. Other fl
 |---|---|
 | `--ui [page]` | Open the settings window (`home`, `torch`, `blacks`, `away`, `apps`, `wear`, `windows`) |
 | `--status` | Print the running agent's status as JSON |
-| `--quit` | Stop the running agent |
+| `--quit` | Stop the running agent and close its settings window |
 | `--selftest` | Check capture, the GPU shader and capture exclusion (briefly dims a small square) |
 | `--selftest --map` | Read-only: print a map of which parts of the screen are changing |
 | `--test-surface [secs]` | Show a white test square to watch dimming happen |
@@ -124,9 +160,13 @@ src/agent/model.rs     static-time model, dimming policy, ramps, feathering
 src/agent/winmap.rs    z-ordered window map (foreground, taskbar, per-app rules)
 src/agent/overlay.rs   DirectComposition click-through overlay (capture-excluded)
 src/agent/panels.rs    UI Automation panel finder for the torch panel style
+src/agent/spook.rs     spooky mode: torch flicker, schedules the cat's visits
+src/agent/critter.rs   the cat and fireflies: behaviour, gait, hunting, window play
 src/agent/color.rs     full-screen colour matrix for deeper blacks
 src/agent/ddc.rs       DDC/CI worker thread with crash-safe restore
 src/agent/mod.rs       tray agent, tiers, power/away logic
 src/ui/                settings window (egui, separate process)
 src/hardening.rs       reversible Windows tweaks
+art/cat/cat.html       the cat, drawn in code; art/bake.ps1 bakes it into assets/cat.png
+docs/*.svg             the demos above: hand-written SMIL, no scripts (heatmap.svg is generated)
 ```
