@@ -5,9 +5,6 @@
 
 use super::critter::{Critter, Env, Scene};
 
-/// Torch dim while spooky mode is on.
-pub const DIM: f32 = 0.95;
-
 const FIRST_AFTER: f64 = 4.0;
 /// The cat walks in this long after the light steadies.
 const CAT_DELAY: f64 = 0.4;

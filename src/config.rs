@@ -102,6 +102,8 @@ pub struct Torch {
     pub hotkey: String,
     /// Bonus animations in the dark: a flickering torch and a little visitor.
     pub spooky: bool,
+    /// Torch dim while spooky mode is on, darker than usual.
+    pub spooky_dim: f32,
 }
 
 /// Near-black grays become true black, through a full-screen color matrix
@@ -221,6 +223,7 @@ impl Default for Torch {
             spotlight_radius_px: 400,
             hotkey: "Ctrl+Alt+Shift+T".into(),
             spooky: false,
+            spooky_dim: 0.95,
         }
     }
 }
@@ -324,6 +327,7 @@ impl Config {
         c.fade_secs = c.fade_secs.clamp(0.2, 30.0);
         let t = &mut self.torch;
         t.dim = t.dim.clamp(0.0, 0.95);
+        t.spooky_dim = t.spooky_dim.clamp(0.5, 0.98);
         t.spotlight_radius_px = t.spotlight_radius_px.clamp(50, 3000);
         self.blacks.level = self.blacks.level.clamp(0.0, 0.35);
         let a = &mut self.away;

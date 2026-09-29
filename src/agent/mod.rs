@@ -638,7 +638,7 @@ impl Agent {
                         (rect.is_none(), lit_rect, halo)
                     }
                 };
-                let dim = if self.spook.is_some() { spook::DIM } else { t.dim };
+                let dim = if self.spook.is_some() { t.spooky_dim } else { t.dim };
                 let (flicker, snap) = self.spook.as_ref().map_or((1.0, false), |k| k.flicker(now, i));
                 Some(model::TorchCtx { dim, lit_foreground, lit_rect, halo, flicker, snap })
             };
@@ -1080,6 +1080,7 @@ impl Agent {
     /// True while anything is on screen.
     fn drive_cat(&mut self, now: f64) -> bool {
         let (cursor, _) = pointer();
+        let dim = self.cfg.torch.spooky_dim;
         let mut shown = false;
         for (i, s) in self.screens.iter_mut().enumerate() {
             let scene = self.spook.as_mut().filter(|_| s.enabled).and_then(|k| {
@@ -1087,7 +1088,7 @@ impl Agent {
                     mon: s.d.rect,
                     geom: s.d.geom,
                     target: &s.target,
-                    dim: spook::DIM,
+                    dim,
                     pointer: (cursor.x as f32, cursor.y as f32),
                     wins: &s.cat_wins,
                 };
