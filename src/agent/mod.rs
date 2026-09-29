@@ -3,13 +3,16 @@
 //! a 30 Hz loop only while something is animating or the screen is resting.
 
 mod capture;
+mod cat_frames;
 mod color;
+mod critter;
 mod ddc;
 mod model;
 mod overlay;
 mod panels;
 mod power;
 pub mod selftest;
+mod spook;
 mod tray;
 mod winmap;
 
@@ -151,6 +154,8 @@ struct Agent {
     torch_active: bool,
     panel: PanelTracker,
     color: ColorState,
+    /// Spooky mode's animations, while it and torch are on.
+    spook: Option<spook::Spook>,
 }
 
 /// Full-screen color matrix for deeper blacks.
@@ -249,6 +254,7 @@ impl Agent {
             torch_active: false,
             panel: PanelTracker::default(),
             color: ColorState { fx: None, failed: false, fader: color::Fader::default(), target: color::IDENTITY },
+            spook: None,
         };
         a.rebuild();
         a.register_hotkey();
@@ -261,6 +267,9 @@ impl Agent {
         self.save_ledgers();
         self.screens.clear();
         let now = util::now();
+        if let Some(k) = &mut self.spook {
+            k.cancel(now);
+        }
         let mut unresolved = false;
         match capture::enumerate() {
             Ok(e) => {
@@ -447,7 +456,7 @@ impl Agent {
         }
         self.update_away(now, idle);
         self.compute_targets(now);
-        let animating = self.animate();
+        let animating = self.animate() | self.drive_cat(now);
         self.accumulate_ledgers(dt);
         self.update_frame_timer(animating);
         for s in &self.screens {
@@ -474,7 +483,7 @@ impl Agent {
             let now = util::now();
             let (p, alt) = pointer();
             let moved = (p.x, p.y, alt) != self.last_pointer;
-            let mut recompute = self.torch_active && moved;
+            let mut recompute = self.torch_active && (moved || self.spook.as_ref().is_some_and(|k| k.flickering(now)));
             if let Some(zones) = &self.chrome_zones {
                 let flags = reveal_flags(zones, p, alt, now, &mut self.chrome_reveal, &self.cfg.chrome);
                 recompute |= flags != self.chrome_revealed;
@@ -486,7 +495,7 @@ impl Agent {
                 self.compute_targets(now);
             }
         }
-        let animating = self.animate();
+        let animating = self.animate() | self.drive_cat(util::now());
         self.update_frame_timer(animating);
     }
 
@@ -566,12 +575,14 @@ impl Agent {
         let mut interactive = false;
         self.chrome_zones = None;
         self.torch_active = false;
-        for s in &mut self.screens {
+        let torch_on = self.cfg.torch.enabled;
+        self.start_spook(now, cursor, blocked);
+        for (i, s) in self.screens.iter_mut().enumerate() {
             let suspended = blocked || !s.enabled || (s.fullscreen && !self.cfg.dim_fullscreen_apps);
             let neglected =
                 multi && now - s.last_attention >= self.cfg.static_dimming.neglected_after_secs as f64;
             // Torch mode replaces chrome dimming while it is on.
-            let chrome = if suspended || !self.cfg.chrome.enabled || self.cfg.torch.enabled {
+            let chrome = if suspended || !self.cfg.chrome.enabled || torch_on {
                 None
             } else {
                 chrome_ctx(&self.cfg.chrome, &self.snap, s, cursor, alt, now, &mut self.chrome_reveal)
@@ -581,7 +592,7 @@ impl Agent {
                 self.chrome_revealed = ctx.revealed;
             }
             let chrome = chrome.map(|(ctx, _)| ctx);
-            let torch = if suspended || !self.cfg.torch.enabled {
+            let torch = if suspended || !torch_on {
                 None
             } else {
                 let t = &self.cfg.torch;
@@ -607,7 +618,9 @@ impl Agent {
                         (rect.is_none(), lit_rect, halo)
                     }
                 };
-                Some(model::TorchCtx { dim: t.dim, lit_foreground, lit_rect, halo })
+                let dim = if self.spook.is_some() { spook::DIM } else { t.dim };
+                let (flicker, snap) = self.spook.as_ref().map_or((1.0, false), |k| k.flicker(now, i));
+                Some(model::TorchCtx { dim, lit_foreground, lit_rect, halo, flicker, snap })
             };
             self.torch_active |= torch.is_some();
             interactive |= chrome.is_some() || torch.is_some();
@@ -1022,6 +1035,53 @@ impl Agent {
         self.update_tray(now);
     }
 
+    /// Keeps spooky mode in step with the settings and starts the next show
+    /// on the screen under the pointer when one is due.
+    fn start_spook(&mut self, now: f64, cursor: POINT, blocked: bool) {
+        let want = self.cfg.torch.enabled && self.cfg.torch.spooky;
+        if want != self.spook.is_some() {
+            self.spook = want.then(|| spook::Spook::new(now));
+        }
+        let Some(k) = self.spook.as_mut() else { return };
+        if blocked {
+            k.cancel(now);
+            return;
+        }
+        if !k.due(now) {
+            return;
+        }
+        let inside = |r: &RECT| cursor.x >= r.left && cursor.x < r.right && cursor.y >= r.top && cursor.y < r.bottom;
+        if let Some(i) = self.screens.iter().position(|s| inside(&s.d.rect) && s.enabled) {
+            k.start(now, i);
+        }
+    }
+
+    /// Moves spooky mode's cat and fireflies and hands them to the overlays.
+    /// True while anything is on screen.
+    fn drive_cat(&mut self, now: f64) -> bool {
+        let (cursor, _) = pointer();
+        let mut shown = false;
+        for (i, s) in self.screens.iter_mut().enumerate() {
+            let scene = self.spook.as_mut().filter(|_| s.enabled).and_then(|k| {
+                let env = critter::Env {
+                    mon: s.d.rect,
+                    geom: s.d.geom,
+                    target: &s.target,
+                    dim: spook::DIM,
+                    pointer: (cursor.x as f32, cursor.y as f32),
+                };
+                k.cat(now, i, &env)
+            });
+            shown |= scene.is_some();
+            if let Some(o) = &mut s.overlay
+                && let Err(e) = o.set_scene(&scene.unwrap_or_default())
+            {
+                log!("overlay: cat update failed for {}: {}", s.d.name, e.message());
+            }
+        }
+        shown
+    }
+
     fn toggle_blacks(&mut self) {
         self.cfg.blacks.enabled = !self.cfg.blacks.enabled;
         self.color.failed = false;
@@ -1054,7 +1114,13 @@ impl Agent {
             return "Resting the screen".into();
         }
         let n = self.screens.iter().filter(|s| s.enabled).count();
-        let torch = if self.cfg.torch.enabled { " · torch mode" } else { "" };
+        let torch = if self.spook.is_some() {
+            " · you are not alone"
+        } else if self.cfg.torch.enabled {
+            " · torch mode"
+        } else {
+            ""
+        };
         let blacks = if self.cfg.blacks.enabled { " · deeper blacks" } else { "" };
         format!("Protecting {} display{}{torch}{blacks}", n, if n == 1 { "" } else { "s" })
     }

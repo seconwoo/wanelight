@@ -100,6 +100,8 @@ pub struct Torch {
     pub spotlight_radius_px: u32,
     /// Toggle hotkey. Empty disables it.
     pub hotkey: String,
+    /// Bonus animations in the dark: a flickering torch and a little visitor.
+    pub spooky: bool,
 }
 
 /// Near-black grays become true black, through a full-screen color matrix
@@ -218,6 +220,7 @@ impl Default for Torch {
             dim: 0.6,
             spotlight_radius_px: 400,
             hotkey: "Ctrl+Alt+Shift+T".into(),
+            spooky: false,
         }
     }
 }

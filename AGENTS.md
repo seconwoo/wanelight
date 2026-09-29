@@ -6,13 +6,14 @@ Guidance for coding agents working on Wanelight, a Windows tray app that prevent
 
 - Toolchain: Rust MSVC 1.92+ (developed on 1.94) and the Windows SDK (`rc.exe`, used by `build.rs` to embed the icon and the PerMonitorV2 manifest).
 - `cargo build --release` produces a single file, `target\release\wanelight.exe`.
+- Whenever you build, also run `cargo build --release` so `target\release` always has the latest code, alongside any test build in `target/test`. If the build can't replace the exe because the agent is running, say so. Don't stop the agent yourself.
 - Keep `eframe` pinned to 0.35. Version 0.36 needs rustc 1.95.
 - New Win32 APIs usually need an extra `windows` feature in `Cargo.toml`. If a type is "not found", check the feature list there first.
 - Release builds use the `windows` subsystem, so there is no console. Commands that print output call `util::attach_console()`.
 
 ## Testing without disturbing the user's instance
 
-The user normally has an agent running from `target\release`. Don't kill it or replace its binary while testing unless they ask.
+The user normally has an agent running from `target\release`. Don't kill it while testing unless they ask. Test with the copy in `target/test`, not the one in `target\release`.
 
 - Build test copies into a separate target dir: `cargo build --release --target-dir target/test`.
 - Run the test copy with `WANELIGHT_DATA_DIR=<scratch dir>`. That separates its config, logs and ledger, and adds a suffix to the single-instance mutex and agent window class, so it runs next to the real one. Without the variable, launching a second copy just opens the settings window of the one already running.
@@ -23,6 +24,7 @@ The user normally has an agent running from `target\release`. Don't kill it or r
   - `--selftest --map` is read-only and prints which parts of the screen are changing.
   - `--panel-probe [--brief]` prints the panels panel mode would pick.
   - `--test-surface [secs]` shows a white square that you can watch dim.
+- Spooky mode's cat is drawn inside the overlay, so it is capture-excluded too. To grab it on screen, start the test copy with `--no-capture-exclusion` and pin the pointer with `WANELIGHT_DEBUG_POINTER`. With debugging on, the log records the cat's state changes (`cat: Hunt -> Wiggle`).
 - Live screen content confuses before/after comparisons. Use `--test-surface` or another controlled window, not whatever is on screen.
 - Stop test instances when you're done: `WANELIGHT_DATA_DIR=<same dir> wanelight.exe --quit`.
 
@@ -35,7 +37,9 @@ capture.rs  DXGI Desktop Duplication + HLSL compute shader -> per 16x16 cell mea
 model.rs    per-cell static time, dimming targets (static, chrome, torch), eased ramps, blur
 winmap.rs   z-ordered window map: foreground, taskbar, per-app rules
 panels.rs   UI Automation on a background MTA thread, used by torch panel mode
-overlay.rs  DirectComposition overlay at grid resolution, scaled x16, capture-excluded
+overlay.rs  DirectComposition overlay at grid resolution, scaled x16, capture-excluded; cat sprite layer under the mask
+spook.rs    spooky mode: torch flicker, schedules the cat's visits
+critter.rs  spooky mode's cat and fireflies: behavior, gait, hunting, sprite frame table
 color.rs    full-screen color matrix (Magnification API) for deeper blacks
 mod.rs      agent loop, tiers (away, display off, pixel refresh), input tracking, tray, IPC
 ddc.rs      DDC/CI brightness worker with a crash-safe restore file
@@ -62,5 +66,6 @@ ddc.rs      DDC/CI brightness worker with a crash-safe restore file
 - New config fields go in `config.rs` with serde defaults and a clamp in `sanitized()`. Settings sliders use `SliderClamping::Edits`, and the UI writes config only when a value changes.
 - The settings UI is always dark.
 - The README demos in `docs/*.svg` are hand-written, self-animating SVGs (SMIL, no scripts). `heatmap.svg` is generated. The demo dimming is deliberately stronger than the defaults. To check a change, render frames in headless Edge using `pauseAnimations()` and `setCurrentTime()`.
+- The spooky cat is drawn in code in `art/cat/cat.html` (open it in a browser to preview). `art/bake.ps1` bakes it into `assets/cat.png` with headless Edge, writes `art/cat/sheet.png` for review, and generates `src/agent/cat_frames.rs` (clip ranges, and the mouth and tentacle-tip position in every frame, which keep caught fireflies on the drawing). Rebake after any art change; don't edit the generated file.
 - User-facing text (README, UI strings) uses plain, short sentences.
 - Commit messages have an imperative subject line and a short body. Commit on `master` when asked. Don't push unless asked.

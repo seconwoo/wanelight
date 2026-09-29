@@ -1,0 +1,366 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Spooky cat</title>
+<style>
+  body { background: #0a0a10; color: #9aa3c0; font: 13px system-ui, sans-serif; margin: 16px; }
+  canvas { background: #15151f; margin: 4px; image-rendering: auto; }
+  label { margin-right: 12px; }
+  .clip { display: inline-block; text-align: center; }
+</style>
+<!--
+  The spooky-mode cat, drawn from code so every pose is smooth.
+  Open this file in a browser to preview the clips. art/bake.ps1 opens it
+  with #bake in headless Edge, which packs every frame into assets/cat.png.
+  The frame table in src/agent/critter.rs must match CLIPS below.
+-->
+<div id="controls"><label><input type="checkbox" id="dim"> Show it dimmed</label></div>
+<div id="clips"></div>
+<pre id="out" hidden></pre>
+<pre id="sheet" hidden></pre>
+<pre id="meta" hidden></pre>
+<script>
+const W = 288, H = 192, COLS = 16;
+// Frame (0,0) is the feet anchor at x = 100, y = 184, facing right.
+const CLIPS = [
+  ['walk', 8], ['run', 6], ['sit', 12], ['groom', 12], ['stare', 8], ['reach', 18], ['startle', 6],
+  ['stalk', 8], ['wiggle', 6], ['pounce', 8], ['fly', 8], ['chew', 8], ['chewsit', 8],
+];
+// Firefly frames sit in the middle of their cell: FLY x FLY px at (FLY_X, FLY_Y).
+const FLY = 32, FLY_X = 128, FLY_Y = 80;
+const C = {
+  fur: '#1d1c2c', furHi: '#34335a', furFar: '#15141f', rim: '#8c9dcc',
+  eye: '#ffd27a', pupil: '#140f08', nose: '#6a4a6a', mouth: '#3b1020', tongue: '#c65b7c',
+  tent: '#1e5c58', tentHi: '#5fb3a8', suck: '#cfeee0',
+};
+
+const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+const TAU = Math.PI * 2;
+
+// Pose for clip `name` at frame i of n.
+function pose(name, i, n) {
+  const t = i / n, u = n > 1 ? i / (n - 1) : 0;
+  const p = { sit: false, bob: 0, lean: 0, legPh: 0, legAmp: 0, tail: 0, tilt: 0, blink: 0, ears: 0,
+              mouth: 0, ext: 0, wig: 0, pupil: 2.6, stretch: 0, groom: 0, paw: 0, puff: 0, lick: 0, headDY: 0,
+              crouch: 0, leap: 0, rump: 0 };
+  switch (name) {
+    case 'walk':
+      Object.assign(p, { legPh: t * TAU, legAmp: 0.5, bob: 2.5 * Math.abs(Math.sin(t * TAU)), tail: 0.25 * Math.sin(t * TAU) });
+      break;
+    case 'run':
+      Object.assign(p, { legPh: t * TAU, legAmp: 0.95, bob: 4 * Math.abs(Math.sin(t * TAU)), lean: 5, stretch: 6, ears: 0.5, tail: -0.6 });
+      break;
+    case 'sit':
+      Object.assign(p, { sit: true, tail: Math.sin(t * TAU), tilt: 0.04 * Math.sin(t * TAU),
+                         blink: [0, 0, 0, 0, 0, 0.5, 1, 0.5, 0, 0, 0, 0][i] });
+      break;
+    case 'groom':
+      Object.assign(p, { sit: true, groom: 1, paw: 5 * Math.sin(2 * t * TAU), tilt: 0.22 + 0.04 * Math.sin(2 * t * TAU), blink: 0.75,
+                         tail: 0.4 * Math.sin(t * TAU), headDY: 4 });
+      break;
+    case 'stare':
+      Object.assign(p, { sit: true, tilt: 0.14 * Math.sin(t * TAU), pupil: 5, tail: 0.3 * Math.sin(2 * t * TAU) });
+      break;
+    case 'reach':
+      Object.assign(p, { sit: true, pupil: 4.5, tail: 0.5 * Math.sin(u * TAU),
+                         mouth: smooth(0, 0.15, u) * (1 - smooth(0.84, 0.94, u)),
+                         ext: smooth(0.1, 0.5, u) * (1 - smooth(0.72, 0.88, u)),
+                         wig: u * TAU * 1.5, lick: smooth(0.9, 0.95, u) * (1 - smooth(0.97, 1.0, u)) });
+      p.lean = 6 * p.ext;
+      break;
+    case 'stalk':
+      // Low and slow, eyes fixed on the prey.
+      Object.assign(p, { crouch: 0.8, legPh: t * TAU, legAmp: 0.35, pupil: 4.8, ears: 0.15,
+                         tail: -0.25 + 0.12 * Math.sin(t * TAU) });
+      break;
+    case 'wiggle':
+      // The rear end shimmy before a pounce.
+      Object.assign(p, { crouch: 1, pupil: 5.2, ears: 0.1, rump: 0.07 * Math.sin(t * TAU * 2),
+                         bob: -1.5 * Math.abs(Math.sin(t * TAU * 2)), tail: -0.3 + 0.25 * Math.sin(t * TAU * 2) });
+      break;
+    case 'pounce':
+      // Jaws open in the air and snap shut on landing.
+      Object.assign(p, { pupil: 5, ears: 0.25, tail: -0.45,
+                         crouch: 1 - smooth(0.1, 0.3, u) + smooth(0.75, 0.95, u),
+                         leap: smooth(0.15, 0.35, u) * (1 - smooth(0.65, 0.85, u)),
+                         mouth: smooth(0.2, 0.4, u) * (1 - smooth(0.75, 0.9, u)) });
+      p.stretch = 12 * p.leap;
+      break;
+    case 'chew':
+    case 'chewsit':
+      // Three chomps with happy squints, then a lick.
+      Object.assign(p, { sit: name === 'chewsit', crouch: name === 'chew' ? 0.5 : 0,
+                         mouth: [0.45, 0.05, 0.4, 0.05, 0.3, 0, 0, 0][i],
+                         blink: [0, 0.6, 0, 0.6, 0, 0.3, 0, 0][i],
+                         headDY: [0, 2, 0, 2, 0, 1, 0, 0][i],
+                         lick: [0, 0, 0, 0, 0, 0.7, 1, 0.4][i], tail: 0.3 * Math.sin(t * TAU) });
+      break;
+    case 'startle':
+      Object.assign(p, { ears: 1, bob: 12 * Math.sin(Math.PI * u), lean: -6 * Math.sin(Math.PI * u), pupil: 1.6,
+                         puff: Math.sin(Math.PI * Math.min(1, u * 1.4)), tail: -0.5 });
+      break;
+  }
+  return p;
+}
+
+// Shapes are drawn twice: once fat in the rim colour (only the outer edge
+// survives) and once filled, so the silhouette gets a clean glowing outline.
+function drawCat(ctx, p) {
+  const parts = [];
+  const add = (fill, path, opts = {}) => parts.push({ fill, path, ...opts });
+  const ell = (x, y, rx, ry, rot = 0) => c => c.ellipse(x, y, rx, ry, rot, 0, TAU);
+  const capsule = (x0, y0, x1, y1, r) => c => {
+    const a = Math.atan2(y1 - y0, x1 - x0);
+    c.arc(x0, y0, r, a + Math.PI / 2, a - Math.PI / 2);
+    c.arc(x1, y1, r, a - Math.PI / 2, a + Math.PI / 2);
+    c.closePath();
+  };
+  const leg = (hx, hy, ang, len, r) => capsule(hx, hy, hx + len * Math.sin(ang), hy + len * Math.cos(ang), r);
+
+  let head;
+  if (!p.sit) {
+    const by = 146 - p.bob + 12 * p.crouch, bx = 100 + p.lean;
+    // Tail
+    const sw = p.tail, puff = 11 + 7 * p.puff;
+    add(C.fur, c => {
+      c.moveTo(bx - 42, by - 6);
+      c.bezierCurveTo(bx - 72, by - 14 + 20 * sw, bx - 78, by - 50 + 30 * sw, bx - 62 + 24 * sw, by - 70 + 26 * Math.max(0, sw));
+    }, { stroke: puff });
+    const ph = p.legPh, a = p.legAmp;
+    // Mid-leap the front legs reach forward and the hind legs push back.
+    const hind = x => a * Math.sin(ph + x) - 1.1 * p.leap, front = x => a * Math.sin(ph + x) + 1.0 * p.leap;
+    const len = 30 + p.bob - 12 * p.crouch;
+    add(C.furFar, leg(bx - 28 - p.stretch * 0.5, by + 8, hind(Math.PI), len, 6.5));
+    add(C.furFar, leg(bx + 26 + p.stretch * 0.5, by + 8, front(0), len, 6.5));
+    add(C.fur, ell(bx, by, 46 + p.stretch, 26 + 4 * p.puff - 3 * p.crouch, p.rump - 0.08 * p.crouch * (1 - p.leap)), { shade: true });
+    add(C.fur, leg(bx - 22 - p.stretch * 0.5, by + 10, hind(0), len - 2, 7));
+    add(C.fur, leg(bx + 32 + p.stretch * 0.5, by + 10, front(Math.PI), len - 2, 7));
+    head = { x: bx + 48 + p.stretch * 0.5 + 6 * p.crouch, y: by - 38 + p.headDY + 8 * p.crouch };
+  } else {
+    const lx = p.lean;
+    add(C.fur, c => {
+      c.moveTo(78, 176);
+      c.bezierCurveTo(52, 184, 30, 180, 26 + 5 * p.tail, 160 - 12 * Math.abs(p.tail));
+    }, { stroke: 11 });
+    add(C.furFar, capsule(116 + lx, 140, 118 + lx, 180, 6.5));
+    add(C.fur, ell(84, 162, 30, 21), { shade: true });
+    add(C.fur, ell(104 + lx * 0.6, 136, 30, 37, -0.22), { shade: true });
+    if (p.groom) {
+      const py = 106 + p.paw;
+      add(C.fur, capsule(126 + lx, 142, 150, py, 7));
+    } else {
+      add(C.fur, capsule(130 + lx, 142, 131 + lx, 181, 7));
+    }
+    head = { x: 128 + lx, y: 84 + p.headDY };
+  }
+  const hx = head.x, hy = head.y, tilt = p.tilt;
+  const rot = (dx, dy) => [hx + dx * Math.cos(tilt) - dy * Math.sin(tilt), hy + dx * Math.sin(tilt) + dy * Math.cos(tilt)];
+  // Ears lie back and flatten when scared.
+  const ear = (base, tipAng) => c => {
+    const back = p.ears * 0.9;
+    const a0 = base - 0.32, a1 = base + 0.32, at = tipAng - back;
+    const [x0, y0] = rot(31 * Math.cos(a0), 29 * Math.sin(a0));
+    const [x1, y1] = rot(31 * Math.cos(a1), 29 * Math.sin(a1));
+    const [xt, yt] = rot((52 - 14 * p.ears) * Math.cos(at), (50 - 14 * p.ears) * Math.sin(at));
+    c.moveTo(x0, y0); c.quadraticCurveTo(xt, yt, xt, yt); c.lineTo(x1, y1); c.closePath();
+  };
+  add(C.fur, ear(-2.05, -2.0));
+  add(C.fur, ear(-1.05, -1.1));
+  add(C.fur, ell(hx, hy, 34, 30, tilt), { shade: true });
+
+  // Outline, then fills.
+  for (const pass of ['rim', 'fill']) {
+    for (const part of parts) {
+      ctx.beginPath();
+      part.path(ctx);
+      if (part.stroke) {
+        ctx.lineCap = 'round';
+        ctx.lineWidth = part.stroke + (pass === 'rim' ? 5 : 0);
+        ctx.strokeStyle = pass === 'rim' ? C.rim : part.fill;
+        ctx.stroke();
+      } else if (pass === 'rim') {
+        ctx.lineWidth = 5; ctx.strokeStyle = C.rim; ctx.lineJoin = 'round'; ctx.stroke();
+      } else {
+        // Cel shading: a lit top-left edge, the rest in shadow.
+        ctx.fillStyle = part.shade ? C.furHi : part.fill;
+        ctx.fill();
+        if (part.shade) {
+          ctx.save(); ctx.clip();
+          ctx.translate(4, 5); ctx.beginPath(); part.path(ctx);
+          ctx.fillStyle = part.fill; ctx.fill();
+          ctx.restore();
+        }
+      }
+    }
+  }
+
+  // Inner ears
+  ctx.fillStyle = '#3a2a45';
+  for (const [b, t] of [[-2.05, -2.0], [-1.05, -1.1]]) {
+    ctx.save(); ctx.beginPath(); ear(b, t)(ctx); ctx.clip();
+    ctx.beginPath(); const [cx, cy] = rot(38 * Math.cos(t - p.ears * 0.9), 38 * Math.sin(t - p.ears * 0.9));
+    ctx.arc(cx, cy + 3, 7, 0, TAU); ctx.fill(); ctx.restore();
+  }
+
+  // Eyes: big and pale so they glint even when dimmed.
+  const eye = (dx, dy, rx, ry) => {
+    const [ex, ey] = rot(dx, dy);
+    const open = 1 - p.blink;
+    if (open < 0.15) {
+      ctx.strokeStyle = C.rim; ctx.lineWidth = 2; ctx.beginPath();
+      ctx.moveTo(ex - rx, ey + 1); ctx.quadraticCurveTo(ex, ey + 4, ex + rx, ey + 1); ctx.stroke();
+      return;
+    }
+    ctx.save();
+    ctx.beginPath(); ctx.ellipse(ex, ey, rx, ry * open, tilt, 0, TAU);
+    ctx.fillStyle = C.eye; ctx.fill(); ctx.clip();
+    ctx.fillStyle = '#e9a64a'; ctx.beginPath(); ctx.ellipse(ex, ey + ry * 0.55, rx * 1.2, ry * 0.6, tilt, 0, TAU); ctx.fill();
+    ctx.fillStyle = C.pupil; ctx.beginPath(); ctx.ellipse(ex + 1.5, ey, p.pupil, ry * 0.85, tilt, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(ex - rx * 0.35, ey - ry * 0.4 * open, 2.4, 0, TAU); ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = '#0b0a12'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(ex, ey, rx, ry * open, tilt, 0, TAU); ctx.stroke();
+  };
+  eye(-5, -3, 7, 10);
+  eye(15, -2, 8.5, 11);
+
+  // Nose, mouth, whiskers
+  const [nx, ny] = rot(27, 6);
+  ctx.fillStyle = C.nose; ctx.beginPath(); ctx.moveTo(nx - 3, ny - 1); ctx.lineTo(nx + 3, ny - 1); ctx.lineTo(nx, ny + 3); ctx.fill();
+  const [mx, my] = rot(24, 15);
+  if (p.mouth > 0.02) {
+    ctx.fillStyle = C.mouth; ctx.strokeStyle = C.rim; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(mx, my, 3 + 6 * p.mouth, 1 + 7 * p.mouth, tilt, 0, TAU); ctx.fill(); ctx.stroke();
+  } else {
+    ctx.strokeStyle = C.rim; ctx.lineWidth = 1.3; ctx.beginPath();
+    ctx.moveTo(mx - 5, my - 2); ctx.quadraticCurveTo(mx - 2, my + 2, mx, my - 1); ctx.quadraticCurveTo(mx + 2, my + 2, mx + 5, my - 2); ctx.stroke();
+  }
+  if (p.lick > 0.02) {
+    ctx.fillStyle = C.tongue; ctx.beginPath(); ctx.ellipse(mx + 2, my + 2, 3 * p.lick + 1, 2.5 * p.lick, 0.3, 0, TAU); ctx.fill();
+  }
+  ctx.strokeStyle = 'rgba(140,157,204,0.55)'; ctx.lineWidth = 1;
+  for (const k of [-1, 0, 1]) {
+    const [wx, wy] = rot(20, 10 + k * 2);
+    ctx.beginPath(); ctx.moveTo(wx, wy); ctx.quadraticCurveTo(wx + 14, wy + k * 3 - 2, wx + 28, wy + k * 6); ctx.stroke();
+  }
+
+  const tip = p.ext > 0.01 ? drawTentacles(ctx, mx, my, p) : null;
+  return { mouth: [mx, my], tip };
+}
+
+// The secret: tentacles uncurl from the mouth and feel their way forward.
+// Returns the tip of the one that grabs prey (the second from the top).
+function drawTentacles(ctx, mx, my, p) {
+  const N = 16;
+  let grab = null;
+  for (let k = 0; k < 4; k++) {
+    const len = (100 + 18 * ((k * 7) % 3)) * p.ext;
+    const seg = len / N;
+    let ang = -0.55 + k * 0.33, x = mx, y = my;
+    const pts = [[x, y]];
+    for (let i = 1; i <= N; i++) {
+      const f = i / N;
+      ang += 0.16 * Math.sin(p.wig + k * 1.7 + f * 4) * f + (k - 1.5) * 0.012;
+      x += seg * Math.cos(ang); y += seg * Math.sin(ang);
+      pts.push([x, y]);
+    }
+    if (k === 1) grab = [x, y];
+    const width = i => 6.5 * (1 - i / N) + 1.2;
+    const left = [], right = [];
+    for (let i = 0; i <= N; i++) {
+      const [ax, ay] = pts[Math.max(0, i - 1)], [bx, by] = pts[Math.min(N, i + 1)];
+      const a = Math.atan2(by - ay, bx - ax), w = width(i);
+      left.push([pts[i][0] - w * Math.sin(a), pts[i][1] + w * Math.cos(a)]);
+      right.push([pts[i][0] + w * Math.sin(a), pts[i][1] - w * Math.cos(a)]);
+    }
+    ctx.beginPath();
+    left.forEach(([px, py], i) => i ? ctx.lineTo(px, py) : ctx.moveTo(px, py));
+    right.reverse().forEach(([px, py]) => ctx.lineTo(px, py));
+    ctx.closePath();
+    ctx.fillStyle = C.tent; ctx.fill();
+    ctx.strokeStyle = C.tentHi; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.stroke();
+    ctx.fillStyle = C.suck;
+    for (let i = 2; i < N - 1; i += 2) {
+      const [sx, sy] = left[i];
+      ctx.beginPath(); ctx.arc((sx + pts[i][0] * 2) / 3, (sy + pts[i][1] * 2) / 3, width(i) * 0.32, 0, TAU); ctx.fill();
+    }
+  }
+  return grab;
+}
+
+// A firefly: a tiny dark body, flickering wings and a soft green glow.
+function drawFly(ctx, flap, glow) {
+  const x = FLY_X + FLY / 2, y = FLY_Y + FLY / 2;
+  if (glow > 0) {
+    const g = ctx.createRadialGradient(x, y + 2, 0, x, y + 2, 15);
+    g.addColorStop(0, `rgba(226, 255, 150, ${0.95 * glow})`);
+    g.addColorStop(0.25, `rgba(190, 240, 110, ${0.55 * glow})`);
+    g.addColorStop(1, 'rgba(150, 220, 80, 0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y + 2, 15, 0, TAU); ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(210, 225, 255, 0.55)';
+  for (const side of [-1, 1]) {
+    ctx.beginPath(); ctx.ellipse(x + side * 3, y - 3, 4, 2, side * (flap ? 0.9 : 0.3), 0, TAU); ctx.fill();
+  }
+  ctx.fillStyle = '#1a1a14'; ctx.beginPath(); ctx.ellipse(x, y, 1.8, 3.2, 0, 0, TAU); ctx.fill();
+  ctx.fillStyle = `rgb(${200 + 55 * glow}, 255, ${120 + 40 * glow})`;
+  ctx.beginPath(); ctx.ellipse(x, y + 2.5, 1.6, 1.8, 0, 0, TAU); ctx.fill();
+}
+
+// Draws frame i of clip `name`: fly frames are 2 wing poses x 4 glow levels.
+// Returns where the mouth and the grabbing tentacle's tip are, for the agent.
+function drawFrame(ctx, name, i, n) {
+  if (name === 'fly') { drawFly(ctx, i >> 2, (i & 3) / 3); return { mouth: [0, 0], tip: null }; }
+  return drawCat(ctx, pose(name, i, n));
+}
+
+function frames() {
+  const out = [];
+  for (const [name, n] of CLIPS) for (let i = 0; i < n; i++) out.push([name, i, n]);
+  return out;
+}
+
+function bake() {
+  const all = frames();
+  const atlas = document.createElement('canvas');
+  atlas.width = W * COLS; atlas.height = H * Math.ceil(all.length / COLS);
+  const a = atlas.getContext('2d');
+  const meta = [];
+  all.forEach(([name, i, n], k) => {
+    a.save(); a.translate((k % COLS) * W, Math.floor(k / COLS) * H);
+    a.beginPath(); a.rect(0, 0, W, H); a.clip();
+    meta.push(drawFrame(a, name, i, n)); a.restore();
+  });
+  document.getElementById('meta').textContent = JSON.stringify({ clips: CLIPS, frames: meta });
+  document.getElementById('out').textContent = atlas.toDataURL('image/png');
+  const sheet = document.createElement('canvas');
+  sheet.width = atlas.width / 2; sheet.height = atlas.height / 2;
+  const s = sheet.getContext('2d');
+  s.fillStyle = '#34344a'; s.fillRect(0, 0, sheet.width, sheet.height);
+  s.drawImage(atlas, 0, 0, sheet.width, sheet.height);
+  s.fillStyle = '#ffd27a'; s.font = '11px sans-serif';
+  all.forEach(([name, i], k) => s.fillText(`${name} ${i}`, (k % COLS) * W / 2 + 3, Math.floor(k / COLS) * H / 2 + 11));
+  document.getElementById('sheet').textContent = sheet.toDataURL('image/png');
+}
+
+function preview() {
+  const box = document.getElementById('clips');
+  const views = CLIPS.map(([name, n]) => {
+    const d = document.createElement('div'); d.className = 'clip';
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    d.append(c, document.createElement('br'), name); box.append(d);
+    return { name, n, ctx: c.getContext('2d'), c };
+  });
+  let f = 0;
+  setInterval(() => {
+    const dim = document.getElementById('dim').checked;
+    for (const v of views) {
+      v.c.style.filter = dim ? 'brightness(0.3)' : '';
+      v.ctx.clearRect(0, 0, W, H);
+      drawFrame(v.ctx, v.name, f % v.n, v.n);
+    }
+    f++;
+  }, 1000 / 12);
+}
+
+if (location.hash === '#bake') { document.getElementById('controls').hidden = true; bake(); } else preview();
+</script>

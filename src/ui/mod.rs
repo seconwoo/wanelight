@@ -576,6 +576,10 @@ impl App {
                 });
             }
         });
+        card(ui, |ui| {
+            switch(ui, &mut t.spooky, "Spooky mode");
+            ui.label(RichText::new("Bonus animations in the dark. The rest dims almost to black.").weak());
+        });
         let note = if self.cfg.static_dimming.enabled || self.cfg.chrome.enabled {
             "Turn it on and off any time with the shortcut or from the tray icon. While it's on, it replaces the dimming under More dimming."
         } else {

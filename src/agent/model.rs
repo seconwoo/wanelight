@@ -94,6 +94,8 @@ pub enum Motion {
     Chrome,
     /// Torch mode: quick but eased.
     Torch,
+    /// Spooky mode's flickering torch: a failing bulb cuts out and back at once.
+    Snap,
 }
 
 /// Edge bands of a maximized/fullscreen foreground window, in cell units.
@@ -136,6 +138,10 @@ pub struct TorchCtx {
     pub lit_rect: Option<[f32; 4]>,
     /// Lit circle around the cursor: centre (cells), radius and feather (cells).
     pub halo: Option<(f32, f32, f32, f32)>,
+    /// Torch brightness: 1 normally, lower while spooky mode flickers it.
+    pub flicker: f32,
+    /// Flicker changes land at once instead of easing.
+    pub snap: bool,
 }
 
 /// Inputs to the per-cell policy for one monitor.
@@ -181,8 +187,9 @@ pub fn targets(model: &Model, p: &PolicyCtx, out: &mut [f32], motion: &mut [Moti
                 let dist = ((cx - hx).powi(2) + (cy - hy).powi(2)).sqrt();
                 lit = lit.max(1.0 - smoothstep(radius, radius + feather, dist));
             }
+            lit *= tc.flicker;
             *t = tc.dim * (1.0 - lit);
-            *m = Motion::Torch;
+            *m = if tc.snap { Motion::Snap } else { Motion::Torch };
             continue;
         }
 
@@ -245,14 +252,17 @@ pub fn ramp(cur: &mut [f32], target: &[f32], motion: &[Motion], dt: f32, gentle_
             *c = t;
             continue;
         }
-        if t > *c {
+        if m == Motion::Snap {
+            *c = ease(*c, t, 0.015);
+            animating = true;
+        } else if t > *c {
             match m {
                 Motion::Gentle => *c = (*c + gentle_up * dt).min(t),
                 Motion::Chrome => {
                     *c = ease(*c, t, e.chrome_in);
                     animating = true;
                 }
-                Motion::Torch => {
+                Motion::Torch | Motion::Snap => {
                     *c = ease(*c, t, e.torch_in);
                     animating = true;
                 }
