@@ -121,6 +121,10 @@ Changes apply as you make them, so there's no Save button.
 To change a shortcut, click it and press the new keys. **Exit Wanelight**, at the bottom of
 the sidebar, stops Wanelight and closes the window.
 
+## Download
+
+Get `wanelight.exe` from [Releases](https://github.com/seconwoo/wanelight/releases). It's a single file with no installer. Run it and it starts in the tray.
+
 ## Build
 
 Requires the Rust MSVC toolchain (1.92+) and the Windows SDK (for `rc.exe`).
