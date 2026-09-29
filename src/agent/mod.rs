@@ -1167,6 +1167,7 @@ impl Agent {
             tray::ID_TORCH => self.toggle_torch(),
             tray::ID_BLACKS => self.toggle_blacks(),
             tray::ID_EXIT => unsafe {
+                crate::ui::close();
                 let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
             },
             _ => {}
@@ -1181,6 +1182,7 @@ impl Agent {
             ipc::CMD_RESUME => self.resume(),
             ipc::CMD_RELOAD_CONFIG => self.reload_config(),
             ipc::CMD_QUIT => unsafe {
+                crate::ui::close();
                 let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
             },
             ipc::CMD_RESET_LEDGER => {

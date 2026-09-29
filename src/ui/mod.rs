@@ -37,6 +37,11 @@ fn request_path() -> std::path::PathBuf {
     util::data_dir().join("ui-request.txt")
 }
 
+/// Asks an open settings window to close. Called by the agent when it exits.
+pub fn close() {
+    let _ = std::fs::write(request_path(), "quit");
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tab {
     Home,
@@ -171,6 +176,8 @@ pub fn run(tab: &str) -> i32 {
         }
         std::mem::forget(_mutex);
     }
+    // A leftover request (for example a quit sent after the window had closed).
+    let _ = std::fs::remove_file(request_path());
     let icon = icon_art::app_icon_rgba(64);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -255,7 +262,7 @@ impl App {
         self.tweak_backup = hardening::ITEMS.iter().map(|i| hardening::has_backup(i.key)).collect();
     }
 
-    fn poll(&mut self) {
+    fn poll(&mut self, ctx: &egui::Context) {
         let now = util::now();
         if now - self.last_poll < 1.0 {
             return;
@@ -266,7 +273,11 @@ impl App {
         self.status = if self.agent_running { ipc::read_status() } else { None };
         if let Ok(t) = std::fs::read_to_string(request_path()) {
             let _ = std::fs::remove_file(request_path());
-            self.tab = Tab::parse(&t);
+            if t.trim() == "quit" {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                self.tab = Tab::parse(&t);
+            }
         }
         if self.tab == Tab::Apps {
             self.open_apps = open_apps();
@@ -837,6 +848,14 @@ impl App {
                 ui.add_space(12.0);
                 ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).weak().small());
             });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                if ui.button("Exit Wanelight").on_hover_text("Stops protecting the screen and closes this window.").clicked() {
+                    ipc::send_command(ipc::CMD_QUIT, 0);
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
         });
     }
 }
@@ -1257,7 +1276,7 @@ fn open_apps() -> Vec<String> {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.poll();
+        self.poll(ui.ctx());
         egui::Panel::left("nav")
             .resizable(false)
             .exact_size(196.0)
