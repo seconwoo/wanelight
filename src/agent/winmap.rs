@@ -3,13 +3,10 @@
 
 use std::collections::HashMap;
 
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
-use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{BOOL, PWSTR};
+use windows::core::BOOL;
 
 use super::capture::{CELL, GridGeom};
 use crate::util::from_wide;
@@ -169,26 +166,11 @@ impl ProcessNames {
             && now - t < 60.0 {
                 return name.clone();
             }
-        let name = unsafe { query_process_name(pid) }.unwrap_or_default();
+        let name = crate::util::process_name(pid).unwrap_or_default();
         if self.cache.len() > 512 {
             self.cache.retain(|_, (_, t)| now - *t < 60.0);
         }
         self.cache.insert(pid, (name.clone(), now));
         name
-    }
-}
-
-unsafe fn query_process_name(pid: u32) -> Option<String> {
-    unsafe {
-        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = [0u16; 520];
-        let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
-        let _ = CloseHandle(h);
-        if !ok {
-            return None;
-        }
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
-        Some(path.rsplit(['\\', '/']).next().unwrap_or("").to_ascii_lowercase())
     }
 }

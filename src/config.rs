@@ -31,6 +31,8 @@ pub struct Config {
     pub apps: Apps,
     /// Per-monitor preferences keyed by monitor id.
     pub monitors: BTreeMap<String, MonitorPrefs>,
+    /// Settings window shows every setting instead of the simple view.
+    pub show_all_settings: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -179,6 +181,7 @@ impl Default for Config {
             refresh: Refresh::default(),
             apps: Apps::default(),
             monitors: BTreeMap::new(),
+            show_all_settings: false,
         }
     }
 }

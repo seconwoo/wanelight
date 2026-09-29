@@ -88,11 +88,8 @@ impl HeatmapView {
 
     pub fn show(&mut self, ui: &mut egui::Ui, agent_running: bool) {
         self.reload(agent_running);
-        ui.heading("Wear heatmap");
-        ui.label("How much light each part of the screen has put out since tracking began, measured as time at full white. Bright, sharp-edged shapes are where burn-in would appear first.");
-        ui.add_space(8.0);
         if self.ledgers.is_empty() {
-            ui.label(RichText::new("No data yet. Wanelight records wear while it runs; check back in a few minutes.").weak());
+            ui.label(RichText::new("No data yet. Wanelight records wear while it runs, so check back in a few minutes.").weak());
             return;
         }
         ui.horizontal(|ui| {
@@ -103,15 +100,20 @@ impl HeatmapView {
                         ui.selectable_value(&mut self.selected, i, &l.name);
                     }
                 });
-            ui.radio_value(&mut self.metric, Metric::Emitted, "Light emitted");
-            ui.radio_value(&mut self.metric, Metric::Avoided, "Wear avoided by dimming");
+            ui.add_space(8.0);
+            let current = if self.metric == Metric::Emitted { 0 } else { 1 };
+            match super::segmented(ui, Some(current), &[(0, "Light given off"), (1, "Light saved by dimming")]) {
+                Some(0) => self.metric = Metric::Emitted,
+                Some(_) => self.metric = Metric::Avoided,
+                None => {}
+            }
         });
         let (id, ledger) = &self.ledgers[self.selected];
         let (gw, gh) = (ledger.gw, ledger.gh);
         let total_e: f64 = ledger.emitted.iter().map(|&v| v as f64).sum();
         let total_a: f64 = ledger.avoided.iter().map(|&v| v as f64).sum();
         ui.label(format!(
-            "Tracked for {:.1} h · dimming avoided {:.1}% of the light this screen would have emitted.",
+            "Tracked for {:.1} h. Dimming saved {:.1}% of the light this screen would have given off.",
             ledger.seconds / 3600.0,
             if total_e + total_a > 0.0 { total_a / (total_e + total_a) * 100.0 } else { 0.0 }
         ));
@@ -139,7 +141,7 @@ impl HeatmapView {
             if let Some(v) = self.values().and_then(|v| v.get(cy.min(gh - 1) * gw + cx.min(gw - 1))) {
                 let label = match self.metric {
                     Metric::Emitted => format!("{} at full white", hours(*v)),
-                    Metric::Avoided => format!("{} of full white avoided", hours(*v)),
+                    Metric::Avoided => format!("{} at full white saved", hours(*v)),
                 };
                 resp.on_hover_text_at_pointer(label);
             }
@@ -180,7 +182,7 @@ impl HeatmapView {
                     self.confirm_reset = false;
                 }
             });
-        } else if ui.button("Reset history…").clicked() {
+        } else if ui.button("Clear history…").clicked() {
             self.confirm_reset = true;
         }
     }
