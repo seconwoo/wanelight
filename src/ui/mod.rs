@@ -15,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, PCWSTR, w};
 
-use crate::config::{Config, StaticDimming, TorchMode};
+use crate::config::{Config, MORE_DIMMING, StaticDimming, TorchMode};
 use crate::ipc::{self, Status};
 use crate::{autostart, hardening, icon_art, util};
 
@@ -57,7 +57,7 @@ impl Tab {
             "blacks" => Tab::Blacks,
             "away" => Tab::Away,
             "apps" => Tab::Apps,
-            "more" | "automatic" | "protection" => Tab::More,
+            "more" | "automatic" | "protection" if MORE_DIMMING => Tab::More,
             "wear" | "heatmap" => Tab::Wear,
             "windows" | "tweaks" => Tab::Windows,
             _ => Tab::Home,
@@ -402,7 +402,6 @@ impl App {
         if monitors.is_empty() {
             ui.label(RichText::new("Display details appear here while Wanelight is running.").weak());
         }
-        let all = self.cfg.show_all_settings;
         for m in monitors {
             card(ui, |ui| {
                 let entry = self.cfg.monitors.entry(m.id.clone()).or_default();
@@ -423,18 +422,16 @@ impl App {
                     format!("Dimming {:.0}% of this screen, by up to {:.0}%.", m.dimmed_fraction * 100.0, m.max_dim * 100.0)
                 };
                 ui.label(RichText::new(line).weak());
-                if all {
-                    let ddc = match m.ddc_supported {
-                        Some(true) => "Brightness control (DDC/CI): supported",
-                        Some(false) => "Brightness control (DDC/CI): not supported",
-                        None => "Brightness control (DDC/CI): not checked yet",
-                    };
-                    ui.label(
-                        RichText::new(format!("{:.0}% of the screen has been still for over a minute · {ddc}", m.static_fraction * 100.0))
-                            .weak()
-                            .small(),
-                    );
-                }
+                let ddc = match m.ddc_supported {
+                    Some(true) => "Brightness control (DDC/CI): supported",
+                    Some(false) => "Brightness control (DDC/CI): not supported",
+                    None => "Brightness control (DDC/CI): not checked yet",
+                };
+                ui.label(
+                    RichText::new(format!("{:.0}% of the screen has been still for over a minute · {ddc}", m.static_fraction * 100.0))
+                        .weak()
+                        .small(),
+                );
             });
         }
         if let Some(st) = &self.status
@@ -466,7 +463,6 @@ impl App {
     }
 
     fn more(&mut self, ui: &mut egui::Ui) {
-        let all = self.cfg.show_all_settings;
         let s = &mut self.cfg.static_dimming;
         let fullscreen = &mut self.cfg.dim_fullscreen_apps;
         let mut enabled = s.enabled;
@@ -486,29 +482,26 @@ impl App {
                 });
                 let blurb = match preset_of(s) {
                     Some(i) => PRESETS[i].blurb,
-                    None if all => "Your own mix, set below.",
-                    None => "Your own mix. Turn on \"Show all settings\" to see it.",
+                    None => "Your own mix, set below.",
                 };
                 row(ui, "", |ui| ui.label(RichText::new(blurb).weak()));
-                if all {
-                    group(ui, "Everywhere except the window you're using", "The taskbar, side panels, other windows and the desktop.");
-                    pct(ui, "Dim by up to", &mut s.background_max_dim, 0.0..=0.6);
-                    mins(ui, "Start after", &mut s.background_after_secs, 1..=30);
-                    group(ui, "The window you're using", "Only its still toolbars and sidebars, and much later.");
-                    pct(ui, "Dim by up to", &mut s.foreground_max_dim, 0.0..=0.3);
-                    mins(ui, "Start after", &mut s.foreground_after_secs, 5..=60);
-                    group(ui, "Displays you're not using", "With more than one display: one that hasn't had the pointer or focus for a while.");
-                    pct(ui, "Dim by up to", &mut s.neglected_monitor_dim, 0.0..=0.6);
-                    mins(ui, "Counts as unused after", &mut s.neglected_after_secs, 1..=60);
-                    group(ui, "Feel", "");
-                    row(ui, "Fade-in speed", |ui| {
-                        ui.add(slider(&mut s.fade_in_percent_per_minute, 5.0..=120.0).custom_formatter(|v, _| format!("{v:.0}% a minute")))
-                            .on_hover_text("20% a minute or slower is below what most people notice.");
-                    });
-                    row(ui, "Ignore if darker than", |ui| {
-                        ui.add(slider(&mut s.min_brightness, 0.0..=0.5).custom_formatter(|v, _| format!("{:.0}% of white", v * 100.0)));
-                    });
-                }
+                group(ui, "Everywhere except the window you're using", "The taskbar, side panels, other windows and the desktop.");
+                pct(ui, "Dim by up to", &mut s.background_max_dim, 0.0..=0.6);
+                mins(ui, "Start after", &mut s.background_after_secs, 1..=30);
+                group(ui, "The window you're using", "Only its still toolbars and sidebars, and much later.");
+                pct(ui, "Dim by up to", &mut s.foreground_max_dim, 0.0..=0.3);
+                mins(ui, "Start after", &mut s.foreground_after_secs, 5..=60);
+                group(ui, "Displays you're not using", "With more than one display: one that hasn't had the pointer or focus for a while.");
+                pct(ui, "Dim by up to", &mut s.neglected_monitor_dim, 0.0..=0.6);
+                mins(ui, "Counts as unused after", &mut s.neglected_after_secs, 1..=60);
+                group(ui, "Feel", "");
+                row(ui, "Fade-in speed", |ui| {
+                    ui.add(slider(&mut s.fade_in_percent_per_minute, 5.0..=120.0).custom_formatter(|v, _| format!("{v:.0}% a minute")))
+                        .on_hover_text("20% a minute or slower is below what most people notice.");
+                });
+                row(ui, "Ignore if darker than", |ui| {
+                    ui.add(slider(&mut s.min_brightness, 0.0..=0.5).custom_formatter(|v, _| format!("{:.0}% of white", v * 100.0)));
+                });
                 ui.add_space(4.0);
                 switch(ui, fullscreen, "Also in full-screen games and videos");
                 indented(ui, |ui| {
@@ -530,22 +523,20 @@ impl App {
             |_| {},
             |ui| {
                 pct(ui, "Dim them by", &mut c.max_dim, 0.1..=0.9);
-                if all {
-                    row(ui, "Start after", |ui| {
-                        ui.add(slider(&mut c.after_secs, 10..=600).custom_formatter(|v, _| {
-                            if v < 60.0 { format!("{v:.0} s") } else { format!("{:.1} min", v / 60.0) }
-                        }));
-                    });
-                    row(ui, "Light up within", |ui| {
-                        ui.add(slider(&mut c.reveal_px, 20..=400).custom_formatter(|v, _| format!("{v:.0} px of the pointer")));
-                    });
-                    row(ui, "Stay lit for", |ui| {
-                        ui.add(slider(&mut c.hold_secs, 0.5..=15.0).custom_formatter(|v, _| format!("{v:.1} s")));
-                    });
-                    row(ui, "Fade over", |ui| {
-                        ui.add(slider(&mut c.fade_secs, 0.5..=10.0).custom_formatter(|v, _| format!("{v:.1} s")));
-                    });
-                }
+                row(ui, "Start after", |ui| {
+                    ui.add(slider(&mut c.after_secs, 10..=600).custom_formatter(|v, _| {
+                        if v < 60.0 { format!("{v:.0} s") } else { format!("{:.1} min", v / 60.0) }
+                    }));
+                });
+                row(ui, "Light up within", |ui| {
+                    ui.add(slider(&mut c.reveal_px, 20..=400).custom_formatter(|v, _| format!("{v:.0} px of the pointer")));
+                });
+                row(ui, "Stay lit for", |ui| {
+                    ui.add(slider(&mut c.hold_secs, 0.5..=15.0).custom_formatter(|v, _| format!("{v:.1} s")));
+                });
+                row(ui, "Fade over", |ui| {
+                    ui.add(slider(&mut c.fade_secs, 0.5..=10.0).custom_formatter(|v, _| format!("{v:.1} s")));
+                });
             },
         );
 
@@ -616,7 +607,6 @@ impl App {
     }
 
     fn away(&mut self, ui: &mut egui::Ui) {
-        let all = self.cfg.show_all_settings;
         let a = &mut self.cfg.away;
         feature(
             ui,
@@ -626,12 +616,10 @@ impl App {
             |_| {},
             |ui| {
                 mins(ui, "After", &mut a.dim_after_secs, 1..=60);
-                if all {
-                    pct(ui, "Fade by", &mut a.dim_amount, 0.2..=0.95);
-                    row(ui, "Fade over", |ui| {
-                        ui.add(slider(&mut a.fade_secs, 5.0..=120.0).custom_formatter(|v, _| format!("{v:.0} s")));
-                    });
-                }
+                pct(ui, "Fade by", &mut a.dim_amount, 0.2..=0.95);
+                row(ui, "Fade over", |ui| {
+                    ui.add(slider(&mut a.fade_secs, 5.0..=120.0).custom_formatter(|v, _| format!("{v:.0} s")));
+                });
             },
         );
 
@@ -696,11 +684,9 @@ impl App {
                 row(ui, "Every", |ui| {
                     ui.add(slider(&mut r.hours_between, 1.0..=12.0).custom_formatter(|v, _| format!("{v:.1} h of use")));
                 });
-                if all {
-                    row(ui, "Rest for", |ui| {
-                        ui.add(slider(&mut r.rest_minutes, 1..=60).custom_formatter(|v, _| format!("{v:.0} min")));
-                    });
-                }
+                row(ui, "Rest for", |ui| {
+                    ui.add(slider(&mut r.rest_minutes, 1..=60).custom_formatter(|v, _| format!("{v:.0} min")));
+                });
                 switch(ui, &mut r.remind, "Remind me if it goes far too long without a rest");
             },
         );
@@ -729,7 +715,9 @@ impl App {
             },
         );
 
-        let all = self.cfg.show_all_settings;
+        if !MORE_DIMMING {
+            return;
+        }
         let dim = &mut self.cfg.static_dimming.high_risk_app_dim;
         let list = &mut self.cfg.apps.high_risk;
         let input = &mut self.new_high_risk;
@@ -750,10 +738,8 @@ impl App {
                         ("Monitoring", &["taskmgr.exe", "hwinfo64.exe", "msiafterburner.exe"]),
                     ],
                 );
-                if all {
-                    ui.add_space(4.0);
-                    pct(ui, "Dim them by up to", dim, 0.0..=0.6);
-                }
+                ui.add_space(4.0);
+                pct(ui, "Dim them by up to", dim, 0.0..=0.6);
             },
         );
     }
@@ -806,8 +792,9 @@ impl App {
             ui.label(RichText::new("Wanelight").size(18.0).strong());
         });
         ui.add_space(12.0);
-        for tab in Tab::ALL {
-            if tab == Tab::More {
+        let first_secondary = if MORE_DIMMING { Tab::More } else { Tab::Wear };
+        for tab in Tab::ALL.into_iter().filter(|&t| t != Tab::More || MORE_DIMMING) {
+            if tab == first_secondary {
                 ui.add_space(6.0);
                 let y = ui.cursor().top();
                 let x = ui.max_rect().x_range();
@@ -841,12 +828,6 @@ impl App {
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
                 ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).weak().small());
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.add_space(12.0);
-                switch(ui, &mut self.cfg.show_all_settings, "Show all settings")
-                    .on_hover_text("Show every setting, not just the main ones.");
             });
         });
     }
@@ -914,7 +895,7 @@ fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(2.0);
 }
 
-/// A sub-heading inside a card, for "Show all settings".
+/// A sub-heading inside a card.
 fn group(ui: &mut egui::Ui, title: &str, detail: &str) {
     ui.add_space(8.0);
     ui.label(RichText::new(title).strong());

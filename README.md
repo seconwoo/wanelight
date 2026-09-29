@@ -9,8 +9,7 @@ with two main tools:
 - **Deeper blacks** turns the dark grays of every app into true black, so those pixels switch off.
 
 Both switch on and off with a shortcut or from the tray. Around them, Wanelight rests the
-screen when you step away, lets the panel run its care cycle, and can also dim still areas
-on its own.
+screen when you step away and lets the panel run its care cycle.
 
 ## See it
 
@@ -41,18 +40,6 @@ No input and nothing moving for 5 minutes: the screen fades down. Any input brin
 
 <p align="center"><img src="docs/away.svg" width="800" alt="Away: after 5 idle minutes with a still screen the display fades; moving the mouse restores it instantly"></p>
 
-### Dim still areas
-
-Bright areas that haven't changed for a while fade down, too slowly to notice. A playing video is never touched, and anything that changes brightens at once.
-
-<p align="center"><img src="docs/static-dimming.svg" width="800" alt="Dim still areas: unchanged bright areas fade down slowly, a playing video is untouched, and changed content brightens at once"></p>
-
-### Hide toolbars until needed
-
-In a full-screen app, still toolbars, sidebars and status bars dim and light up again when you reach for them.
-
-<p align="center"><img src="docs/chrome-reveal.svg" width="800" alt="Hide toolbars until needed: toolbar, sidebar and status bar dim to half brightness; the toolbar lights up when the pointer approaches"></p>
-
 ### Wear map
 
 The settings window shows how much light each part of each screen has given off, so you can see where burn-in would show first.
@@ -69,9 +56,7 @@ The settings window shows how much light each part of each screen has given off,
 | **Turn displays off** | After 20 minutes away, the displays go to sleep, unless audio is playing. |
 | **Lower monitor brightness** *(off by default)* | While you're away, also lowers the monitor's own brightness over DDC/CI. The original brightness comes back on exit, and after a crash on the next start. |
 | **Panel rest** | Counts panel-on hours. After 4 hours it turns the display off at a quiet moment so the panel can run its care cycle. |
-| **Dim still areas** | Samples each monitor about once a second (DXGI Desktop Duplication, reduced on the GPU to 16×16-pixel cells). Bright areas unchanged for 3 minutes fade down by up to 25% (taskbar, sidebars, logos, HUDs). The window you're using is dimmed at most 10%, and only after 15 minutes. Displays you're not using and apps left open all day get stronger dimming. On by default; turn it off under More dimming. |
-| **Hide toolbars until needed** *(off by default)* | When the window you're using fills the screen, its still edges (toolbars, tab strips, sidebars, status bar) dim to 50%. They light up when the pointer comes within 100 px, or while Alt is held, and dim again 3 s after it leaves. |
-| **Wear map** | Keeps a per-cell record of light given off and light saved by dimming, and shows it in the settings window. |
+| **Wear map** | Samples each monitor about once a second (DXGI Desktop Duplication, reduced on the GPU to 16×16-pixel cells), keeps a per-cell record of light given off and light saved by dimming, and shows it in the settings window. |
 | **Windows setup** | Reversible OLED-friendly Windows settings, each a switch: dark mode, black desktop, hidden icons, no accent colour, taskbar auto-hide, display timeout. Turning one off puts your previous setting back. |
 
 It is designed to be non-disruptive:
@@ -94,12 +79,10 @@ Open the settings window from the tray icon, or by running `wanelight.exe` again
 | **Torch** | What stays lit, how much the rest dims, the shortcut |
 | **Deeper blacks** | How dark counts as black, with a before and after preview, and the shortcut |
 | **Away and rest** | Fading, turning displays off, monitor brightness, panel rest |
-| **Apps** | Apps never to dim, and apps left open all day. Pick from open apps or type a name. |
-| **More dimming** | Dim still areas (Gentle, Balanced or Strong) and hide toolbars until needed |
+| **Apps** | Apps never to dim or recolour. Pick from open apps or type a name. |
 | **Wear map** | Light given off, or saved, per part of each screen |
 | **Windows setup** | The reversible Windows settings |
 
-Each page shows the main settings. Turn on **Show all settings** at the bottom of the sidebar to see every one.
 To change a shortcut, click it and press the new keys.
 
 ## Build
@@ -122,7 +105,7 @@ This starts the tray agent; running it again opens the settings window. Other fl
 
 | Flag | Purpose |
 |---|---|
-| `--ui [page]` | Open the settings window (`home`, `torch`, `blacks`, `away`, `apps`, `more`, `wear`, `windows`) |
+| `--ui [page]` | Open the settings window (`home`, `torch`, `blacks`, `away`, `apps`, `wear`, `windows`) |
 | `--status` | Print the running agent's status as JSON |
 | `--quit` | Stop the running agent |
 | `--selftest` | Check capture, the GPU shader and capture exclusion (briefly dims a small square) |

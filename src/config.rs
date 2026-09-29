@@ -10,6 +10,10 @@ use std::time::SystemTime;
 
 use crate::util;
 
+/// Still-area dimming and toolbar hiding aren't ready: while this is false
+/// they stay off and out of the settings window, whatever the file says.
+pub const MORE_DIMMING: bool = false;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Config {
@@ -31,8 +35,6 @@ pub struct Config {
     pub apps: Apps,
     /// Per-monitor preferences keyed by monitor id.
     pub monitors: BTreeMap<String, MonitorPrefs>,
-    /// Settings window shows every setting instead of the simple view.
-    pub show_all_settings: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -181,7 +183,6 @@ impl Default for Config {
             refresh: Refresh::default(),
             apps: Apps::default(),
             monitors: BTreeMap::new(),
-            show_all_settings: false,
         }
     }
 }
@@ -272,11 +273,11 @@ impl Config {
                 Ok(cfg) => cfg.sanitized(),
                 Err(e) => {
                     crate::log!("config: parse error, using defaults: {e}");
-                    Config::default()
+                    Config::default().sanitized()
                 }
             },
             Err(_) => {
-                let cfg = Config::default();
+                let cfg = Config::default().sanitized();
                 let _ = cfg.save();
                 cfg
             }
@@ -294,6 +295,10 @@ impl Config {
 
     /// Clamps values so a hand-edited file can't produce nonsense.
     pub fn sanitized(mut self) -> Config {
+        if !MORE_DIMMING {
+            self.static_dimming.enabled = false;
+            self.chrome.enabled = false;
+        }
         let s = &mut self.static_dimming;
         for v in [
             &mut s.background_max_dim,
