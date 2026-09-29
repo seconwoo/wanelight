@@ -125,6 +125,20 @@ the sidebar, stops Wanelight and closes the window.
 
 Get `wanelight.exe` from [Releases](https://github.com/seconwoo/wanelight/releases). It's a single file with no installer. Run it and it starts in the tray.
 
+## Disclaimer
+
+Wanelight is provided as is, without warranty of any kind. Use it at your own risk. It can
+reduce burn-in but can't prevent it entirely, and the author isn't responsible for any damage
+to your display, system or data. See the MIT license for the full terms.
+
+## Support
+
+Wanelight is free. If it saves your screen and you'd like to say thanks, you can send a tip in bitcoin:
+
+```
+bc1qtv8yck9938ej7pw0pmfmxvg6ek3qr4th3meukw
+```
+
 ## Build
 
 Requires the Rust MSVC toolchain (1.92+) and the Windows SDK (for `rc.exe`).
