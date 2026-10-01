@@ -52,8 +52,11 @@ torch flickers like a failing bulb. Then a small shadow cat drops by.
 
 It wanders the dark and hunts glowing fireflies. It strolls along the tops of your windows,
 hides behind them and peeks out, and sometimes stops to scratch one. When the pointer rests,
-it creeps up to the edge of the light and stares. Come at it, and it bolts. It may also have
-a secret or two.
+it creeps up to the edge of the light and stares. Come at it, and it bolts into the shadows.
+Chase it again, and it runs off. It may also have a secret or two.
+
+Want more company? Turn on **Keep the cat around**. The cat still hides and runs off from the
+pointer, but it comes back a few seconds later.
 
 <p align="center"><img src="docs/spooky.svg" width="800" alt="Spooky mode: the torch flickers, then a shadow cat walks in, pounces on a glowing firefly, creeps up to the edge of the light and runs off when the pointer comes at it"></p>
 
@@ -185,6 +188,6 @@ src/agent/ddc.rs       DDC/CI worker thread with crash-safe restore
 src/agent/mod.rs       tray agent, tiers, power/away logic
 src/ui/                settings window (egui, separate process)
 src/hardening.rs       reversible Windows tweaks
-art/cat/cat.html       the cat, drawn in code; art/bake.ps1 bakes it into assets/cat.png
+art/cat/cat.html       the cat, drawn in code; art/bake.ps1 bakes it into assets/cat.bin
 docs/*.svg             the demos above: hand-written SMIL, no scripts (heatmap.svg is generated)
 ```

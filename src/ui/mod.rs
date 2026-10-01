@@ -593,6 +593,8 @@ impl App {
             if t.spooky {
                 ui.add_space(4.0);
                 pct(ui, "Dim the rest by", &mut t.spooky_dim, 0.5..=0.98);
+                switch(ui, &mut t.spooky_stay, "Keep the cat around");
+                ui.label(RichText::new("It still hides and runs off, but comes back a few seconds later.").weak());
             }
         });
         let note = if self.cfg.static_dimming.enabled || self.cfg.chrome.enabled {

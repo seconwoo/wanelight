@@ -104,6 +104,8 @@ pub struct Torch {
     pub spooky: bool,
     /// Torch dim while spooky mode is on, darker than usual.
     pub spooky_dim: f32,
+    /// The cat stays around, stepping out only for a few seconds at a time.
+    pub spooky_stay: bool,
 }
 
 /// Near-black grays become true black, through a full-screen color matrix
@@ -224,6 +226,7 @@ impl Default for Torch {
             hotkey: "Ctrl+Alt+Shift+T".into(),
             spooky: false,
             spooky_dim: 0.95,
+            spooky_stay: false,
         }
     }
 }

@@ -17,9 +17,9 @@
 //! topmost window that does as a fullscreen app, which stops the auto-hide
 //! taskbar from appearing and can switch on "do not disturb".
 
-use std::sync::{Once, OnceLock};
+use std::sync::Once;
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, E_INVALIDARG, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::DirectComposition::*;
@@ -33,6 +33,7 @@ use windows::core::{Interface, Result, w};
 use windows_numerics::Matrix3x2;
 
 use super::capture::{CELL, GridGeom, Gpu};
+use super::cat_frames as cf;
 use super::critter::{self, MAX_FLIES, Scene};
 use crate::log;
 
@@ -63,27 +64,46 @@ fn register_class() {
     });
 }
 
-/// The cat sprite sheet, decoded once to premultiplied BGRA.
-struct Atlas {
-    pixels: Vec<u8>,
+/// Spooky mode's sprites: every frame trimmed to what's drawn, as its own PNG
+/// (see art/bake.ps1), so frames are decoded one at a time as they're shown.
+static SPRITE_PNGS: &[u8] = include_bytes!("../../assets/cat.bin");
+/// Decoded frames kept for reuse: a clip or two and the fireflies.
+const CACHE_FRAMES: usize = 40;
+
+/// A decoded frame: premultiplied BGRA, trimmed; `at` is where it sits in the frame.
+struct Frame {
+    at: (u32, u32),
     width: u32,
     height: u32,
+    pixels: Vec<u8>,
 }
 
-fn atlas() -> Option<&'static Atlas> {
-    static ATLAS: OnceLock<Option<Atlas>> = OnceLock::new();
-    ATLAS
-        .get_or_init(|| match decode_png(include_bytes!("../../assets/cat.png")) {
-            Ok(a) => Some(a),
-            Err(e) => {
-                log!("overlay: cannot decode the cat sprites: {}", e.message());
-                None
+/// Recently shown frames, most recent last.
+#[derive(Default)]
+struct Frames(Vec<(usize, Frame)>);
+
+impl Frames {
+    fn get(&mut self, k: usize) -> Result<&Frame> {
+        match self.0.iter().position(|(i, _)| *i == k) {
+            Some(i) => {
+                let hit = self.0.remove(i);
+                self.0.push(hit);
             }
-        })
-        .as_ref()
+            None => {
+                let Some(&(x, y, off, len)) = cf::SPRITES.get(k) else { return Err(E_INVALIDARG.into()) };
+                let (pixels, width, height) = decode_png(&SPRITE_PNGS[off as usize..(off + len) as usize])?;
+                if self.0.len() >= CACHE_FRAMES {
+                    self.0.remove(0);
+                }
+                self.0.push((k, Frame { at: (x as u32, y as u32), width, height, pixels }));
+            }
+        }
+        Ok(&self.0[self.0.len() - 1].1)
+    }
 }
 
-fn decode_png(bytes: &[u8]) -> Result<Atlas> {
+/// Decodes a PNG to premultiplied BGRA: pixels, width, height.
+fn decode_png(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
     unsafe {
         let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
         let stream = factory.CreateStream()?;
@@ -95,15 +115,17 @@ fn decode_png(bytes: &[u8]) -> Result<Atlas> {
         conv.GetSize(&mut width, &mut height)?;
         let mut pixels = vec![0u8; (width * height * 4) as usize];
         conv.CopyPixels(std::ptr::null(), width * 4, &mut pixels)?;
-        Ok(Atlas { pixels, width, height })
+        Ok((pixels, width, height))
     }
 }
 
-/// One sprite from the atlas: its own small swap chain showing one frame.
+/// One sprite: its own small swap chain showing one frame, composed on the CPU.
 struct Sprite {
     visual: IDCompositionVisual,
     swap: IDXGISwapChain1,
     frame: Option<usize>,
+    size: (u32, u32),
+    scratch: Vec<u8>,
 }
 
 /// A copy of a scratched window, made when a scratch starts.
@@ -115,11 +137,11 @@ struct Shake {
     at: RECT,
 }
 
-/// Spooky mode's cat and fireflies.
+/// Spooky mode's cat and fireflies. Only exist while something is on screen.
 struct Sprites {
     device: ID3D11Device,
     factory: IDXGIFactory2,
-    atlas: ID3D11Texture2D,
+    frames: Frames,
     /// Clips the cat while it hides behind a window.
     cat_box: IDCompositionVisual,
     cat: Sprite,
@@ -137,9 +159,12 @@ pub struct Overlay {
     hwnd: HWND,
     dcomp: IDCompositionDevice,
     _target: IDCompositionTarget,
-    _root: IDCompositionVisual,
+    root: IDCompositionVisual,
     visual: IDCompositionVisual,
     sprites: Option<Sprites>,
+    sprites_failed: bool,
+    device: ID3D11Device,
+    factory: IDXGIFactory2,
     swap: IDXGISwapChain1,
     context: ID3D11DeviceContext,
     geom: GridGeom,
@@ -203,32 +228,20 @@ impl Overlay {
             visual.SetContent(&swap)?;
             visual.SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR)?;
             visual.SetBorderMode(DCOMPOSITION_BORDER_MODE_SOFT)?;
-            let sprites = Sprites::new(gpu, &dcomp, &factory).unwrap_or_else(|e| {
-                log!("overlay: no spooky sprites: {}", e.message());
-                None
-            });
-            // Back to front: a shaking window copy, the cat, the mask (so both are
-            // dimmed with everything else), then the glowing fireflies.
-            match &sprites {
-                Some(sp) => {
-                    root.AddVisual(&sp.shake.visual, false, None)?;
-                    root.AddVisual(&sp.cat_box, true, &sp.shake.visual)?;
-                    root.AddVisual(&visual, true, &sp.cat_box)?;
-                    for f in &sp.flies {
-                        root.AddVisual(&f.visual, true, &visual)?;
-                    }
-                }
-                None => root.AddVisual(&visual, false, None)?,
-            }
+            // Spooky mode's sprites join the tree around the mask while shown.
+            root.AddVisual(&visual, false, None)?;
             target.SetRoot(&root)?;
             dcomp.Commit()?;
             Ok(Overlay {
                 hwnd,
                 dcomp,
                 _target: target,
-                _root: root,
+                root,
                 visual,
-                sprites,
+                sprites: None,
+                sprites_failed: false,
+                device: gpu.device.clone(),
+                factory,
                 swap,
                 context: gpu.context.clone(),
                 geom,
@@ -317,6 +330,24 @@ impl Overlay {
     /// changed; otherwise just moves the visuals. `desktop` is the monitor's last
     /// captured frame, used to copy a window the cat starts scratching.
     pub fn set_scene(&mut self, scene: &Scene, desktop: Option<&ID3D11Texture2D>) -> Result<()> {
+        if *scene == Scene::default() {
+            // The visit is over: free the sprites until the next one.
+            if let Some(sp) = self.sprites.take() {
+                sp.detach(&self.root);
+                unsafe { self.dcomp.Commit()? };
+            }
+            self.sprites_failed = false;
+            return Ok(());
+        }
+        if self.sprites.is_none() && !self.sprites_failed {
+            match Sprites::new(&self.device, &self.dcomp, &self.factory).and_then(|sp| sp.attach(&self.root, &self.visual).map(|_| sp)) {
+                Ok(sp) => self.sprites = Some(sp),
+                Err(e) => {
+                    log!("overlay: no spooky sprites: {}", e.message());
+                    self.sprites_failed = true;
+                }
+            }
+        }
         let Some(sp) = &mut self.sprites else { return Ok(()) };
         if sp.scene == *scene {
             return Ok(());
@@ -334,11 +365,11 @@ impl Overlay {
             _ => {}
         }
         if let Some(d) = scene.cat {
-            sp.cat.show(&self.context, &sp.atlas, d.frame, (0, 0), (critter::FRAME_W, critter::FRAME_H))?;
+            sp.cat.show(&self.context, &mut sp.frames, d.frame, (0, 0))?;
         }
         for (sprite, fly) in sp.flies.iter_mut().zip(&scene.flies) {
             if let Some(f) = fly {
-                sprite.show(&self.context, &sp.atlas, f.frame, critter::FLY_AT, (critter::FLY, critter::FLY))?;
+                sprite.show(&self.context, &mut sp.frames, f.frame, critter::FLY_AT)?;
             }
         }
         self.place_sprites()?;
@@ -424,7 +455,7 @@ impl Overlay {
 }
 
 impl Sprite {
-    fn new(gpu: &Gpu, dcomp: &IDCompositionDevice, factory: &IDXGIFactory2, width: u32, height: u32) -> Result<Sprite> {
+    fn new(device: &ID3D11Device, dcomp: &IDCompositionDevice, factory: &IDXGIFactory2, width: u32, height: u32) -> Result<Sprite> {
         unsafe {
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width,
@@ -439,26 +470,37 @@ impl Sprite {
                 AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
                 Flags: 0,
             };
-            let swap = factory.CreateSwapChainForComposition(&gpu.device, &desc, None)?;
+            let swap = factory.CreateSwapChainForComposition(device, &desc, None)?;
             let visual = dcomp.CreateVisual()?;
             visual.SetContent(&swap)?;
             visual.SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR)?;
             visual.SetTransform2(&HIDDEN)?;
-            Ok(Sprite { visual, swap, frame: None })
+            Ok(Sprite { visual, swap, frame: None, size: (width, height), scratch: vec![0; (width * height * 4) as usize] })
         }
     }
 
-    /// Copies atlas frame `frame` (the `size` box at `at` inside its cell) into the swap chain.
-    fn show(&mut self, ctx: &ID3D11DeviceContext, atlas: &ID3D11Texture2D, frame: usize, at: (u32, u32), size: (u32, u32)) -> Result<()> {
+    /// Shows frame `frame`: the part of it whose top-left is `at` (px in the frame).
+    fn show(&mut self, ctx: &ID3D11DeviceContext, frames: &mut Frames, frame: usize, at: (u32, u32)) -> Result<()> {
         if self.frame == Some(frame) {
             return Ok(());
         }
-        let (col, row) = ((frame % critter::COLS) as u32, (frame / critter::COLS) as u32);
-        let (x, y) = (col * critter::FRAME_W + at.0, row * critter::FRAME_H + at.1);
-        let src = D3D11_BOX { left: x, top: y, front: 0, right: x + size.0, bottom: y + size.1, back: 1 };
+        let f = frames.get(frame)?;
+        let (w, h) = self.size;
+        self.scratch.fill(0);
+        // The trimmed image, clipped to this sprite's box.
+        let (x0, y0) = (f.at.0.max(at.0), f.at.1.max(at.1));
+        let (x1, y1) = ((f.at.0 + f.width).min(at.0 + w), (f.at.1 + f.height).min(at.1 + h));
+        if x1 > x0 {
+            let row = ((x1 - x0) * 4) as usize;
+            for y in y0..y1 {
+                let src = (((y - f.at.1) * f.width + (x0 - f.at.0)) * 4) as usize;
+                let dst = (((y - at.1) * w + (x0 - at.0)) * 4) as usize;
+                self.scratch[dst..dst + row].copy_from_slice(&f.pixels[src..src + row]);
+            }
+        }
         unsafe {
             let back: ID3D11Texture2D = self.swap.GetBuffer(0)?;
-            ctx.CopySubresourceRegion(&back, 0, 0, 0, 0, atlas, 0, Some(&src));
+            ctx.UpdateSubresource(&back, 0, None, self.scratch.as_ptr() as _, w * 4, 0);
             self.swap.Present(0, DXGI_PRESENT(0)).ok()?;
         }
         self.frame = Some(frame);
@@ -539,29 +581,9 @@ impl Shake {
 }
 
 impl Sprites {
-    fn new(gpu: &Gpu, dcomp: &IDCompositionDevice, factory: &IDXGIFactory2) -> Result<Option<Sprites>> {
-        let Some(a) = atlas() else { return Ok(None) };
-        let atlas = unsafe {
-            let desc = D3D11_TEXTURE2D_DESC {
-                Width: a.width,
-                Height: a.height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                Usage: D3D11_USAGE_IMMUTABLE,
-                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-            };
-            let init = D3D11_SUBRESOURCE_DATA { pSysMem: a.pixels.as_ptr() as _, SysMemPitch: a.width * 4, SysMemSlicePitch: 0 };
-            let mut atlas = None;
-            gpu.device.CreateTexture2D(&desc, Some(&init), Some(&mut atlas))?;
-            let Some(atlas) = atlas else { return Ok(None) };
-            atlas
-        };
-        let cat = Sprite::new(gpu, dcomp, factory, critter::FRAME_W, critter::FRAME_H)?;
-        let fly = || Sprite::new(gpu, dcomp, factory, critter::FLY, critter::FLY);
+    fn new(device: &ID3D11Device, dcomp: &IDCompositionDevice, factory: &IDXGIFactory2) -> Result<Sprites> {
+        let cat = Sprite::new(device, dcomp, factory, critter::FRAME_W, critter::FRAME_H)?;
+        let fly = || Sprite::new(device, dcomp, factory, critter::FLY, critter::FLY);
         let flies = [fly()?, fly()?, fly()?];
         let (cat_box, shake) = unsafe {
             let cat_box = dcomp.CreateVisual()?;
@@ -571,16 +593,39 @@ impl Sprites {
             (cat_box, shake)
         };
         let shake = Shake { visual: shake, swap: None, id: None, at: RECT::default() };
-        Ok(Some(Sprites {
-            device: gpu.device.clone(),
+        Ok(Sprites {
+            device: device.clone(),
             factory: factory.clone(),
-            atlas,
+            frames: Frames::default(),
             cat_box,
             cat,
             flies,
             shake,
             scene: Scene::default(),
-        }))
+        })
+    }
+
+    /// Back to front: a shaking window copy, the cat, the mask (so both are
+    /// dimmed with everything else), then the glowing fireflies.
+    fn attach(&self, root: &IDCompositionVisual, mask: &IDCompositionVisual) -> Result<()> {
+        unsafe {
+            root.AddVisual(&self.cat_box, false, mask)?;
+            root.AddVisual(&self.shake.visual, false, &self.cat_box)?;
+            for f in &self.flies {
+                root.AddVisual(&f.visual, true, mask)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn detach(&self, root: &IDCompositionVisual) {
+        unsafe {
+            let _ = root.RemoveVisual(&self.shake.visual);
+            let _ = root.RemoveVisual(&self.cat_box);
+            for f in &self.flies {
+                let _ = root.RemoveVisual(&f.visual);
+            }
+        }
     }
 }
 

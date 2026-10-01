@@ -5,13 +5,16 @@
   body { background: #0a0a10; color: #9aa3c0; font: 13px system-ui, sans-serif; margin: 16px; }
   canvas { background: #15151f; margin: 4px; image-rendering: auto; }
   label { margin-right: 12px; }
+  h2 { font-size: 14px; font-weight: 600; color: #c8cfe8; margin: 18px 4px 4px; }
   .clip { display: inline-block; text-align: center; }
+  .draft { color: #ffd27a; }
 </style>
 <!--
   The spooky-mode cat, drawn from code so every pose is smooth.
   Open this file in a browser to preview the clips. art/bake.ps1 opens it
   with #bake in headless Edge, which packs every frame into assets/cat.png.
   The frame table in src/agent/critter.rs must match CLIPS below.
+  DRAFTS are previewed (marked "new") but not baked until the agent uses them.
 -->
 <div id="controls"><label><input type="checkbox" id="dim"> Show it dimmed</label></div>
 <div id="clips"></div>
@@ -26,8 +29,29 @@ const CLIPS = [
   ['stalk', 8], ['wiggle', 6], ['pounce', 8], ['fly', 8], ['chew', 8], ['chewsit', 8],
   ['jump', 8], ['scratch', 12],
 ];
+const DRAFTS = [
+  ['trot', 8], ['creep', 8], ['balance', 8], ['turn', 6], ['skid', 6], ['land', 6],
+  ['loaf', 8], ['nap', 12], ['yawn', 10], ['stretch', 12], ['lookaround', 12], ['slowblink', 10], ['earscratch', 8],
+  ['chatter', 6], ['swat', 8], ['clap', 10], ['freeze', 6], ['track', 12], ['toss', 10], ['faceplant', 12],
+  ['lick', 8], ['gulp', 8], ['burp', 8], ['wash', 12], ['slurp', 10], ['spit', 10], ['knead', 8], ['purr', 6],
+  ['hiss', 8], ['flinch', 6], ['tilt', 10], ['sniff', 8], ['doubletake', 12], ['sneeze', 12], ['shake', 8], ['lash', 8], ['hop', 8],
+  ['peek', 8], ['hang', 8], ['dangle', 12], ['dangpaw', 10], ['tap', 8], ['rub', 12], ['slide', 6], ['leap', 6], ['push', 8],
+];
+// Preview sections.
+const GROUPS = [
+  ['Getting around', ['walk', 'run', 'stalk', 'jump', 'trot', 'creep', 'balance', 'turn', 'skid', 'land']],
+  ['Resting', ['sit', 'groom', 'stare', 'loaf', 'nap', 'yawn', 'stretch', 'lookaround', 'slowblink', 'earscratch']],
+  ['Hunting', ['wiggle', 'pounce', 'reach', 'chatter', 'swat', 'clap', 'freeze', 'track', 'toss', 'faceplant']],
+  ['Eating', ['chew', 'chewsit', 'lick', 'gulp', 'burp', 'wash', 'slurp', 'spit', 'knead', 'purr']],
+  ['Reactions', ['startle', 'hiss', 'flinch', 'tilt', 'sniff', 'doubletake', 'sneeze', 'shake', 'lash', 'hop']],
+  ['Window play', ['scratch', 'peek', 'hang', 'dangle', 'dangpaw', 'tap', 'rub', 'slide', 'leap', 'push']],
+  ['Firefly', ['fly']],
+];
 // Where the claws meet the wall in scratch frames (x in the frame).
 const SCRATCH_X = 170;
+// The window top edge the paws hook over in hang frames, and the one the cat
+// lies on in dangle frames (y in the frame).
+const HANG_Y = 76, LEDGE_Y = 112;
 // Firefly frames sit in the middle of their cell: FLY x FLY px at (FLY_X, FLY_Y).
 const FLY = 32, FLY_X = 128, FLY_Y = 80;
 const C = {
@@ -38,13 +62,33 @@ const C = {
 
 const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 const TAU = Math.PI * 2;
+// Rises over [a, b] and falls over [c, d].
+const hold = (a, b, c, d, x) => smooth(a, b, x) * (1 - smooth(c, d, x));
+// Eased point along keyframes pts at u in [0, 1].
+const along = (pts, u) => {
+  const s = Math.min(0.9999, Math.max(0, u)) * (pts.length - 1), k = Math.floor(s), f = s - k, e = f * f * (3 - 2 * f);
+  return [pts[k][0] + (pts[k + 1][0] - pts[k][0]) * e, pts[k][1] + (pts[k + 1][1] - pts[k][1]) * e];
+};
 
 // Pose for clip `name` at frame i of n.
 function pose(name, i, n) {
   const t = i / n, u = n > 1 ? i / (n - 1) : 0;
   const p = { sit: false, bob: 0, lean: 0, legPh: 0, legAmp: 0, tail: 0, tilt: 0, blink: 0, ears: 0,
               mouth: 0, ext: 0, wig: 0, pupil: 2.6, stretch: 0, groom: 0, paw: 0, puff: 0, lick: 0, headDY: 0,
-              crouch: 0, leap: 0, rump: 0, upright: false, stroke: 0 };
+              crouch: 0, leap: 0, rump: 0, upright: false, stroke: 0,
+              // Head turn: 1 profile right, 0 facing the viewer, -1 looking back.
+              look: 1, gaze: [0, 0], eyeBig: 1, noseTw: 0, tongue: 0, neck: 0,
+              // Standing: body pitch (nose down), leg angle offsets, planted feet, raised bent paw, arched back.
+              pitch: 0, fore: 0, hindA: 0, plant: false, pawLift: 0, pawCurl: 1, arch: 0,
+              // Sitting: foreleg targets, kneading, hind leg up to the ear.
+              sitPaw: null, farPaw: null, kn: [0, 0], earScratch: false, thump: 0, gulpY: 0,
+              // Other body modes.
+              lie: false, nap: false, hang: false, breath: 0, tailHang: false, pawDangle: null,
+              pawN: null, pawF: null, dangle: 0, claws: true, flare: 0, fangs: false,
+              // Whole-cat moves: lifted by, jitter, rotation about wobAt, squash for turning.
+              raise: 0, jit: 0, wob: 0, wobAt: [100, 160], sx: 1,
+              // Effects.
+              dust: 0, glow: 0, mist: 0, zz: -1, purr: -1 };
   switch (name) {
     case 'walk':
       Object.assign(p, { legPh: t * TAU, legAmp: 0.5, bob: 2.5 * Math.abs(Math.sin(t * TAU)), tail: 0.25 * Math.sin(t * TAU) });
@@ -112,6 +156,272 @@ function pose(name, i, n) {
       Object.assign(p, { ears: 1, bob: 12 * Math.sin(Math.PI * u), lean: -6 * Math.sin(Math.PI * u), pupil: 1.6,
                          puff: Math.sin(Math.PI * Math.min(1, u * 1.4)), tail: -0.5 });
       break;
+
+    // Getting around.
+    case 'trot':
+      // Springier than a walk, tail up.
+      Object.assign(p, { legPh: t * TAU, legAmp: 0.72, bob: 3.5 * Math.abs(Math.sin(t * TAU)), lean: 2, ears: 0.05,
+                         tail: 0.55 + 0.15 * Math.sin(t * TAU) });
+      break;
+    case 'creep':
+      // Sneaking: low and careful, tail held high with the tip curled.
+      Object.assign(p, { crouch: 0.45, legPh: t * TAU, legAmp: 0.3, bob: Math.abs(Math.sin(t * TAU)), pupil: 4, ears: 0.25,
+                         tail: 1 + 0.08 * Math.sin(t * TAU) });
+      break;
+    case 'balance':
+      // Along a narrow edge: small steps, head low, tail swaying for balance.
+      Object.assign(p, { legPh: t * TAU, legAmp: 0.22, bob: 1.2 * Math.abs(Math.sin(t * TAU)), headDY: 7, pupil: 3.8, gaze: [1, 2],
+                         lean: 1.5 * Math.sin(t * TAU), tail: 0.65 + 0.35 * Math.sin(t * TAU) });
+      break;
+    case 'turn': {
+      // Squashes through facing the viewer; the last frame faces left.
+      const c = Math.cos(Math.PI * u);
+      Object.assign(p, { sx: (c < 0 ? -1 : 1) * Math.max(0.55, Math.abs(c)), look: Math.abs(c),
+                         bob: 2 * Math.sin(Math.PI * u), tail: 0.4 * Math.sin(Math.PI * u) });
+      break;
+    }
+    case 'skid': {
+      // Braking hard out of a run: leaning back, front legs braced, dust.
+      const k = 1 - smooth(0.45, 1, u);
+      Object.assign(p, { lean: -4 * k, pitch: -0.1 * k, fore: 0.6 * k, hindA: 0.35 * k, crouch: 0.35 * k, stretch: 3 * k,
+                         ears: 0.4 * k, tail: -0.4 + 0.7 * u, pupil: 3.6, dust: k });
+      break;
+    }
+    case 'land':
+      // Legs reach for the ground, then bend to take the drop.
+      Object.assign(p, { bob: 6 * (1 - smooth(0, 0.25, u)), crouch: hold(0.1, 0.35, 0.5, 1, u),
+                         fore: 0.3 * (1 - smooth(0, 0.3, u)), hindA: -0.25 * (1 - smooth(0, 0.3, u)),
+                         ears: 0.35 * (1 - u), pupil: 3.4, tail: 0.6 - 0.8 * hold(0.1, 0.35, 0.5, 1, u), dust: hold(0.15, 0.3, 0.4, 0.9, u) });
+      break;
+
+    // Resting.
+    case 'loaf':
+      // Paws tucked under, breathing, eyes half shut.
+      Object.assign(p, { lie: true, breath: 1.2 * Math.sin(t * TAU), tail: 0.2 * Math.sin(t * TAU),
+                         blink: [0.35, 0.35, 0.35, 0.35, 0.35, 0.7, 1, 0.7][i] });
+      break;
+    case 'nap':
+      // Curled up with the tail over the nose; little z's drift up.
+      Object.assign(p, { nap: true, breath: 1.6 * Math.sin(t * TAU), blink: 1, zz: t });
+      break;
+    case 'yawn': {
+      const k = hold(0.1, 0.45, 0.7, 0.95, u);
+      Object.assign(p, { sit: true, fangs: true, mouth: 1.7 * k, tilt: -0.3 * k, blink: Math.min(1, 1.4 * k), ears: 0.4 * k, headDY: -3 * k,
+                         tail: 0.3 * Math.sin(t * TAU) });
+      break;
+    }
+    case 'stretch': {
+      // A long front stretch, rump up, then back to standing.
+      const k = hold(0.05, 0.4, 0.7, 1, u);
+      Object.assign(p, { pitch: 0.36 * k, fore: 1.1 * k, plant: true, hindA: -0.1 * k, tail: 0.2 + 0.7 * k,
+                         blink: 0.8 * k, mouth: 0.6 * hold(0.25, 0.45, 0.55, 0.7, u), ears: 0.3 * k });
+      break;
+    }
+    case 'lookaround': {
+      // Over one shoulder, then back.
+      const k = hold(0.1, 0.45, 0.6, 0.9, u);
+      Object.assign(p, { sit: true, look: 1 - 1.75 * k, gaze: [-2 * k, 0], tilt: -0.08 * k, ears: 0.1 * k,
+                         tail: 0.4 * Math.sin(u * TAU) });
+      break;
+    }
+    case 'slowblink':
+      // A cat's "I trust you", aimed at the viewer.
+      Object.assign(p, { sit: true, look: 0.45, tilt: 0.06, blink: hold(0.1, 0.45, 0.6, 0.95, u), tail: 0.25 * Math.sin(u * TAU) });
+      break;
+    case 'earscratch':
+      // A hind foot thumps away at the ear.
+      Object.assign(p, { sit: true, earScratch: true, thump: Math.sin(t * TAU * 2), blink: 0.85, tilt: 0.2, ears: 0.35, headDY: 3,
+                         mouth: 0.15, tail: 0.2 * Math.sin(t * TAU) });
+      break;
+
+    // Hunting.
+    case 'chatter':
+      // Jaw chattering at prey out of reach.
+      Object.assign(p, { sit: true, pupil: 5.2, tilt: -0.14, gaze: [2, -2], ears: 0.05,
+                         mouth: [0.35, 0.05, 0.4, 0.05, 0.35, 0.05][i], tail: -0.3 + 0.35 * Math.sin(t * TAU * 2) });
+      break;
+    case 'swat':
+      // A quick paw swipe.
+      Object.assign(p, { sit: true, pupil: 4.8, ears: 0.2, sitPaw: along([[131, 181], [146, 108], [186, 120], [160, 158], [131, 181]], u),
+                         lean: 4 * hold(0.2, 0.4, 0.5, 0.8, u), tail: 0.4 * Math.sin(u * TAU) });
+      break;
+    case 'clap': {
+      // Up on the hind legs, both paws clap at something overhead.
+      const k = hold(0, 0.3, 0.75, 1, u), shut = hold(0.4, 0.55, 0.6, 0.75, u);
+      Object.assign(p, { upright: true, dangle: k, claws: false, pupil: 5, tilt: -0.3 * k, headDY: -4 * k, mouth: 0.3 * shut,
+                         pawN: [186 + 14 * (1 - shut), 124 - 94 * k], pawF: [180 - 12 * (1 - shut), 116 - 88 * k], ears: 0.2, tail: 0.4 });
+      break;
+    }
+    case 'freeze':
+      // Mid-step, one paw up, dead still but for the tail tip.
+      Object.assign(p, { pawLift: 1, crouch: 0.3, pupil: 5.2, ears: 0.05, tail: -0.15 + 0.1 * Math.sin(t * TAU) });
+      break;
+    case 'track':
+      // Head following a firefly as it loops about.
+      Object.assign(p, { sit: true, pupil: 4.8, tilt: 0.22 * Math.sin(t * TAU), headDY: 4 * Math.sin(t * TAU),
+                         gaze: [2 * Math.cos(t * TAU), 3 * Math.sin(t * TAU)], tail: 0.4 * Math.sin(t * TAU * 2) });
+      break;
+    case 'toss': {
+      // Scoops the prey up with a paw and watches it go.
+      const up = hold(0.35, 0.6, 0.75, 1, u);
+      Object.assign(p, { sit: true, pupil: 5, sitPaw: along([[131, 181], [156, 178], [162, 118], [150, 112], [131, 181]], u),
+                         tilt: -0.3 * up, gaze: [1, -3 * up], ears: 0.1, tail: 0.3 * Math.sin(u * TAU) });
+      break;
+    }
+    case 'faceplant': {
+      // A missed pounce: nose in the ground, rump up, then a dazed head shake.
+      const k = 1 - smooth(0.45, 0.7, u), dazed = hold(0.6, 0.7, 0.9, 1, u);
+      Object.assign(p, { pitch: 0.55 * k, headDY: 12 * k, fore: 0.9 * k, plant: true, hindA: -0.15 * k, blink: k > 0.5 ? 1 : 0.4 * dazed,
+                         ears: 0.6 * k + 0.2 * dazed, tail: 0.5 * k - 0.2, tilt: 0.16 * Math.sin(u * TAU * 4) * dazed,
+                         look: 1 - 0.25 * dazed });
+      break;
+    }
+
+    // Eating.
+    case 'lick':
+      // Licks its lips, tongue sweeping round.
+      Object.assign(p, { sit: true, lick: hold(0, 0.15, 0.85, 1, u), tongue: -5 + 12 * u, blink: 0.4, tail: 0.3 * Math.sin(u * TAU) });
+      break;
+    case 'gulp':
+      // Head up, a lump slides down the throat.
+      Object.assign(p, { sit: true, tilt: -0.22 * hold(0, 0.25, 0.7, 1, u), blink: hold(0, 0.25, 0.7, 1, u),
+                         gulpY: u < 0.85 ? 108 + 34 * u : 0, headDY: -2 * hold(0, 0.25, 0.7, 1, u), tail: 0.2 });
+      break;
+    case 'burp':
+      // A little green burp, then a smug squint.
+      Object.assign(p, { sit: true, mouth: [0, 0.1, 0.5, 0.6, 0.35, 0.1, 0, 0][i], tilt: -0.1 * hold(0.1, 0.3, 0.5, 0.7, u),
+                         blink: [0, 0, 0.5, 0.7, 0.6, 0.6, 0.5, 0.3][i], glow: smooth(0.2, 1, u), tail: 0.3 * Math.sin(u * TAU) });
+      break;
+    case 'wash': {
+      // Licks a paw and wipes it over the face and ear.
+      const pw = along([[150, 104], [156, 88], [140, 60], [118, 66], [150, 104]], t);
+      Object.assign(p, { sit: true, sitPaw: pw, tilt: 0.28 + 0.06 * Math.sin(t * TAU), headDY: 4, blink: 0.85,
+                         lick: t < 0.12 || t > 0.88 ? 0.8 : 0, tail: 0.35 * Math.sin(t * TAU) });
+      break;
+    }
+    case 'slurp':
+      // Tentacles slurped back in like noodles.
+      Object.assign(p, { sit: true, mouth: 0.35, ext: 0.55 * (1 - smooth(0.05, 0.85, u)), wig: u * TAU * 4, blink: 0.45,
+                         lick: hold(0.85, 0.92, 0.97, 1, u) * 0.9, tail: 0.3 * Math.sin(u * TAU) });
+      break;
+    case 'spit': {
+      // Spits out something nasty and pulls a face.
+      const yuck = smooth(0.45, 0.6, u);
+      Object.assign(p, { sit: true, neck: 8 * hold(0.1, 0.3, 0.35, 0.5, u), mouth: 0.8 * hold(0.15, 0.3, 0.35, 0.5, u),
+                         lick: yuck * (1 - smooth(0.9, 1, u)), tongue: 5 * yuck, blink: 0.6 * yuck, ears: 0.6 * yuck,
+                         look: 1 - 0.3 * yuck * Math.abs(Math.sin(u * TAU * 3)), tail: -0.2 });
+      break;
+    }
+    case 'knead': {
+      // Treading with the front paws, eyes shut in bliss.
+      const s = Math.sin(t * TAU);
+      Object.assign(p, { sit: true, kn: [16 * Math.max(0, s), 16 * Math.max(0, -s)], headDY: 1.5 * Math.abs(s), blink: 0.85, tail: 0.4 * s });
+      break;
+    }
+    case 'purr':
+      // Loafing, eyes shut, rumbling.
+      Object.assign(p, { lie: true, blink: 1, breath: 0.8 * Math.sin(t * TAU), jit: [0, 0.6, 0, -0.6, 0, 0.6][i], purr: t,
+                         tail: 0.15 * Math.sin(t * TAU) });
+      break;
+
+    // Reactions.
+    case 'hiss':
+      // Arched and puffed up, tentacles flared.
+      Object.assign(p, { arch: 1, puff: 1, fangs: true, ears: 1, tail: 0.9, mouth: 0.75 + 0.1 * Math.sin(t * TAU), pupil: 1.8, eyeBig: 1.12,
+                         ext: 0.3 + 0.05 * Math.sin(t * TAU), flare: 0.9, wig: t * TAU, lean: -3 });
+      break;
+    case 'flinch': {
+      const k = hold(0, 0.2, 0.4, 1, u);
+      Object.assign(p, { sit: true, headDY: 9 * k, ears: 0.9 * k, blink: 0.7 * k, lean: -4 * k, tail: -0.3 * k });
+      break;
+    }
+    case 'tilt':
+      // A quizzical head tilt, this way then that.
+      Object.assign(p, { sit: true, look: 0.3, pupil: 4.5, tilt: [0, 0.15, 0.3, 0.35, 0.35, 0.2, -0.1, -0.3, -0.3, -0.1][i],
+                         tail: 0.3 * Math.sin(u * TAU) });
+      break;
+    case 'sniff':
+      // Nose forward and low, twitching.
+      Object.assign(p, { pitch: 0.2, neck: 10, headDY: 16, lean: 3, noseTw: [0, -1.5, 0, -2, 0, -1.5, 0, 0][i], tail: 0.3,
+                         pupil: 3.4 });
+      break;
+    case 'doubletake': {
+      // Glances away, then snaps back wide-eyed.
+      const snap = smooth(0.4, 0.5, u);
+      Object.assign(p, { sit: true, look: -0.5 + 1.5 * snap, blink: 0.3 * (1 - snap), eyeBig: 1 + 0.18 * snap * (1 - smooth(0.8, 1, u)),
+                         pupil: 2.6 - 0.8 * snap, ears: -0.1 * snap, headDY: -6 * hold(0.4, 0.5, 0.6, 0.8, u), tail: 0.5 * snap });
+      break;
+    }
+    case 'sneeze': {
+      // Wind-up, achoo, a little mist, a head shake.
+      const wind = hold(0, 0.4, 0.45, 0.5, u), achoo = hold(0.45, 0.5, 0.6, 0.75, u);
+      Object.assign(p, { sit: true, tilt: -0.3 * wind + 0.3 * achoo, blink: Math.min(1, 0.8 * wind + achoo), headDY: 6 * achoo,
+                         mouth: 0.3 * wind + 0.6 * achoo, mist: smooth(0.48, 0.9, u) * (u < 0.95 ? 1 : 0),
+                         look: 1 - 0.2 * Math.abs(Math.sin(u * TAU * 3)) * smooth(0.7, 0.8, u), ears: 0.3 * achoo });
+      break;
+    }
+    case 'shake': {
+      // A full-body shake, fur flying.
+      const s = Math.sin(t * TAU * 2);
+      Object.assign(p, { wob: 0.12 * s, jit: 2 * s, ears: 0.5 + 0.4 * s, puff: 0.5 * Math.abs(s), blink: 0.8, tail: 0.5 * s, lean: 0 });
+      break;
+    }
+    case 'lash':
+      // Annoyed: standing stiff, eyes narrowed, tail whipping.
+      Object.assign(p, { tail: 0.2 + 0.8 * Math.sin(t * TAU), ears: 0.6, blink: 0.45, pupil: 2 });
+      break;
+    case 'hop':
+      // A stiff-legged surprised hop straight up.
+      Object.assign(p, { bob: 16 * Math.sin(Math.PI * u), arch: 0.6 * Math.sin(Math.PI * u), puff: 0.6 * Math.sin(Math.PI * u),
+                         ears: 0.8 * Math.sin(Math.PI * u), pupil: 1.8, eyeBig: 1.1, fore: -0.15, hindA: 0.15, tail: 0.9 });
+      break;
+
+    // Window play.
+    case 'peek':
+      // Head craned round an edge, the rest held back.
+      Object.assign(p, { crouch: 0.5, neck: 10 + 4 * Math.sin(t * TAU), headDY: 6, pupil: 4.8, tail: -0.2,
+                         blink: [0, 0, 0, 0, 0, 0.6, 0, 0][i], tilt: 0.08 * Math.sin(t * TAU) });
+      break;
+    case 'hang':
+      // Hanging off a window's top edge, hind legs scrabbling.
+      Object.assign(p, { hang: true, legPh: t * TAU, legAmp: 0.8, wob: 0.05 * Math.sin(t * TAU), wobAt: [190, HANG_Y],
+                         ears: 0.3, pupil: 4.5, tail: 0.4 * Math.sin(t * TAU), headDY: -2 * Math.abs(Math.sin(t * TAU)) });
+      break;
+    case 'dangle':
+      // Lying on a window's top edge, tail hanging down over it.
+      Object.assign(p, { lie: true, raise: 184 - LEDGE_Y, tailHang: true, tail: Math.sin(t * TAU), breath: Math.sin(t * TAU),
+                         blink: [0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.7, 1, 0.7, 0.3, 0.3][i], look: 0.8 });
+      break;
+    case 'dangpaw':
+      // Lying on the edge, batting a paw at something below.
+      Object.assign(p, { lie: true, raise: 184 - LEDGE_Y, tailHang: true, tail: 0.5 * Math.sin(t * TAU),
+                         pawDangle: [158 + 16 * Math.sin(t * TAU), 212 + 8 * Math.cos(t * TAU)], pupil: 5, gaze: [1, 3], headDY: 4, tilt: 0.22 });
+      break;
+    case 'tap':
+      // Tapping at a window's side edge, twice.
+      Object.assign(p, { sit: true, pupil: 4.5, ears: 0.1, tilt: -0.05, tail: 0.3 * Math.sin(t * TAU),
+                         sitPaw: along([[131, 181], [SCRATCH_X - 6, 122], [SCRATCH_X - 14, 128], [SCRATCH_X - 6, 122], [131, 181]], t) });
+      break;
+    case 'rub':
+      // Rubbing a cheek along a window's corner, eyes shut, tail high.
+      Object.assign(p, { lean: 8 + 6 * Math.sin(t * TAU), tilt: -0.25 + 0.25 * Math.sin(t * TAU), blink: 0.9, tail: 0.95,
+                         ears: 0.2 + 0.2 * Math.sin(t * TAU), headDY: 4 });
+      break;
+    case 'slide':
+      // Claws out, sliding down a window's side.
+      Object.assign(p, { upright: true, dangle: 1, pawN: [SCRATCH_X - 6, 62 + 2 * Math.sin(t * TAU)], pawF: [SCRATCH_X - 6, 74],
+                         ears: 0.7, pupil: 5, eyeBig: 1.1, jit: [0, 0.8, 0, -0.8, 0, 0.8][i], tail: 0.9, mouth: 0.25 });
+      break;
+    case 'leap':
+      // Flying through the air on a long leap between windows.
+      Object.assign(p, { leap: 1, stretch: 12, fore: 0.1 * Math.sin(t * TAU), hindA: -0.1 * Math.sin(t * TAU), ears: 0.3,
+                         pupil: 4, tail: -0.5 + 0.12 * Math.sin(t * TAU) });
+      break;
+    case 'push':
+      // Paws flat on a window's side, shoving at it.
+      Object.assign(p, { upright: true, claws: false, pawN: [SCRATCH_X - 6, 96], pawF: [SCRATCH_X - 6, 104],
+                         lean: -5 + 5 * Math.sin(t * TAU), blink: 0.55, ears: 0.4, tail: 0.3 * Math.sin(t * TAU) });
+      break;
   }
   return p;
 }
@@ -119,8 +429,15 @@ function pose(name, i, n) {
 // Shapes are drawn twice: once fat in the rim colour (only the outer edge
 // survives) and once filled, so the silhouette gets a clean glowing outline.
 function drawCat(ctx, p) {
-  const parts = [];
+  const base = ctx.getTransform();
+  ctx.save();
+  if (p.raise) ctx.translate(0, -p.raise);
+  if (p.jit) ctx.translate(p.jit, 0);
+  if (p.wob) { ctx.translate(p.wobAt[0], p.wobAt[1]); ctx.rotate(p.wob); ctx.translate(-p.wobAt[0], -p.wobAt[1]); }
+  if (p.sx !== 1) { ctx.translate(100, 0); ctx.scale(p.sx, 1); ctx.translate(-100, 0); }
+  const parts = [], over = [];
   const add = (fill, path, opts = {}) => parts.push({ fill, path, ...opts });
+  const ontop = (fill, path, opts = {}) => over.push({ fill, path, ...opts });
   const ell = (x, y, rx, ry, rot = 0) => c => c.ellipse(x, y, rx, ry, rot, 0, TAU);
   const capsule = (x0, y0, x1, y1, r) => c => {
     const a = Math.atan2(y1 - y0, x1 - x0);
@@ -129,58 +446,134 @@ function drawCat(ctx, p) {
     c.closePath();
   };
   const leg = (hx, hy, ang, len, r) => capsule(hx, hy, hx + len * Math.sin(ang), hy + len * Math.cos(ang), r);
+  // A leg long enough to reach the ground at its angle.
+  const planted = (hy, ang, len) => p.plant ? Math.min(2 * len, (184 - hy) / Math.max(0.3, Math.cos(ang))) : len;
 
   let head;
   if (p.upright) {
     // Paw height over a stroke: drag down slowly, lift back quickly.
     const drag = ph => { const f = ((ph % 1) + 1) % 1; return f < 0.7 ? f / 0.7 : 1 - (f - 0.7) / 0.3; };
     const near = 70 + 44 * drag(p.stroke), far = 70 + 44 * drag(p.stroke + 0.5);
+    const pn = p.pawN || [SCRATCH_X - 6, near], pf = p.pawF || [SCRATCH_X - 6, far];
+    const lx = p.lean, dg = p.dangle;
     add(C.fur, c => {
       c.moveTo(74, 166);
       c.bezierCurveTo(46, 160, 34, 130, 40 + 8 * p.tail, 96);
     }, { stroke: 11 });
-    add(C.furFar, capsule(132, 100, SCRATCH_X - 6, far, 6.5));
-    add(C.furFar, capsule(96, 170, 104, 182, 7));
-    add(C.fur, ell(92, 162, 24, 20), { shade: true });
-    add(C.fur, ell(116, 124, 25, 42, 0.38), { shade: true });
-    add(C.fur, capsule(84, 170, 90, 182, 7.5));
-    add(C.fur, capsule(136, 104, SCRATCH_X - 6, near, 7));
-    head = { x: 138, y: 72 };
-    p.clawNear = near; p.clawFar = far;
+    add(C.furFar, capsule(132 + lx, 100, pf[0], pf[1], 6.5));
+    // Off the ground the hind legs hang loose.
+    add(C.furFar, capsule(96, 170, 104 - 10 * dg, 182 + 6 * dg, 7));
+    add(C.fur, ell(92 + 0.3 * lx, 162, 24, 20), { shade: true });
+    add(C.fur, ell(116 + lx, 124, 25, 42, 0.38), { shade: true });
+    add(C.fur, capsule(84, 170, 90 - 12 * dg, 182 + 6 * dg, 7.5));
+    add(C.fur, capsule(136 + lx, 104, pn[0], pn[1], 7));
+    head = { x: 138 + lx, y: 72 + p.headDY };
+    p.clawNear = pn[1]; p.clawFar = pf[1];
+  } else if (p.hang) {
+    const ph = p.legPh, a = p.legAmp;
+    add(C.fur, c => {
+      c.moveTo(98, 146);
+      c.bezierCurveTo(80, 154, 66 + 12 * p.tail, 162, 58 + 20 * p.tail, 176);
+    }, { stroke: 11 });
+    add(C.furFar, capsule(146, 98, 180, HANG_Y - 2, 6.5));
+    add(C.furFar, ell(184, HANG_Y - 3, 9, 4.5));
+    add(C.furFar, leg(100, 154, 0.3 + a * Math.sin(ph + Math.PI), 20, 6.5));
+    add(C.fur, ell(124, 118, 42, 24, -1.15), { shade: true });
+    add(C.fur, leg(110, 156, 0.2 + a * Math.sin(ph), 18, 7));
+    ontop(C.fur, capsule(152, 100, 196, HANG_Y - 1, 7));
+    ontop(C.fur, ell(200, HANG_Y - 3, 9.5, 4.5));
+    head = { x: 156, y: 58 + p.headDY };
+  } else if (p.nap) {
+    const k = p.breath;
+    add(C.furFar, ell(152, 180, 10, 4.5));
+    add(C.fur, ell(104, 162 - 0.5 * k, 50, 22 + k), { shade: true });
+    add(C.fur, ell(78, 166, 26, 18), { shade: true });
+    // The tail curls round the front, over the nose.
+    ontop(C.fur, c => {
+      c.moveTo(58, 172);
+      c.bezierCurveTo(70, 190, 150, 190, 172, 170);
+    }, { stroke: 11 });
+    head = { x: 144, y: 152 + 0.4 * k };
+    p.tilt += 0.45;
+  } else if (p.lie) {
+    const k = p.breath;
+    if (p.tailHang) {
+      // Over the edge: the tail hangs down past the feet.
+      add(C.fur, c => {
+        c.moveTo(56, 172);
+        c.bezierCurveTo(44, 190, 40 + 10 * p.tail, 220, 44 + 18 * p.tail, 248);
+      }, { stroke: 11 });
+    } else {
+      add(C.fur, c => {
+        c.moveTo(56, 174);
+        c.bezierCurveTo(40, 190, 90, 190, 118 + 6 * p.tail, 184 - 4 * p.tail);
+      }, { stroke: 11 });
+    }
+    add(C.furFar, ell(156, 180, 11, 5));
+    add(C.fur, ell(102, 162 - 0.5 * k, 52, 22 + 0.5 * k), { shade: true });
+    add(C.fur, ell(74, 166, 26, 18), { shade: true });
+    if (p.pawDangle) add(C.fur, capsule(146, 176, p.pawDangle[0], p.pawDangle[1], 7));
+    else add(C.fur, ell(146, 181, 12, 5.5));
+    head = { x: 148 + p.neck, y: 132 + p.headDY + 0.3 * k };
   } else if (!p.sit) {
-    const by = 146 - p.bob + 12 * p.crouch, bx = 100 + p.lean;
+    const by = 146 - p.bob + 12 * p.crouch - 14 * p.arch, bx = 100 + p.lean;
+    // Pitching nose-down drops the shoulders and lifts the hips.
+    const sp = Math.sin(p.pitch), fdy = 30 * sp, hdy = -28 * sp;
     // Tail
     const sw = p.tail, puff = 11 + 7 * p.puff;
     add(C.fur, c => {
-      c.moveTo(bx - 42, by - 6);
-      c.bezierCurveTo(bx - 72, by - 14 + 20 * sw, bx - 78, by - 50 + 30 * sw, bx - 62 + 24 * sw, by - 70 + 26 * Math.max(0, sw));
+      c.moveTo(bx - 42, by - 6 + hdy);
+      c.bezierCurveTo(bx - 72, by - 14 + 20 * sw + hdy, bx - 78, by - 50 + 30 * sw + hdy, bx - 62 + 24 * sw, by - 70 + 26 * Math.max(0, sw) + hdy);
     }, { stroke: puff });
     const ph = p.legPh, a = p.legAmp;
     // Mid-leap the front legs reach forward and the hind legs push back.
-    const hind = x => a * Math.sin(ph + x) - 1.1 * p.leap, front = x => a * Math.sin(ph + x) + 1.0 * p.leap;
-    const len = 30 + p.bob - 12 * p.crouch;
-    add(C.furFar, leg(bx - 28 - p.stretch * 0.5, by + 8, hind(Math.PI), len, 6.5));
-    add(C.furFar, leg(bx + 26 + p.stretch * 0.5, by + 8, front(0), len, 6.5));
-    add(C.fur, ell(bx, by, 46 + p.stretch, 26 + 4 * p.puff - 3 * p.crouch, p.rump - 0.08 * p.crouch * (1 - p.leap)), { shade: true });
-    add(C.fur, leg(bx - 22 - p.stretch * 0.5, by + 10, hind(0), len - 2, 7));
-    add(C.fur, leg(bx + 32 + p.stretch * 0.5, by + 10, front(Math.PI), len - 2, 7));
-    head = { x: bx + 48 + p.stretch * 0.5 + 6 * p.crouch, y: by - 38 + p.headDY + 8 * p.crouch };
+    const hind = x => a * Math.sin(ph + x) - 1.1 * p.leap + p.hindA, front = x => a * Math.sin(ph + x) + 1.0 * p.leap + p.fore;
+    const len = 30 + p.bob - 12 * p.crouch + 14 * p.arch;
+    const hy = by + hdy, fy = by + fdy;
+    add(C.furFar, leg(bx - 28 - p.stretch * 0.5, hy + 8, hind(Math.PI), planted(hy + 8, hind(Math.PI), len - hdy), 6.5));
+    add(C.furFar, leg(bx + 26 + p.stretch * 0.5, fy + 8, front(0), planted(fy + 8, front(0), len - fdy), 6.5));
+    add(C.fur, ell(bx, by, 46 + p.stretch, 26 + 4 * p.puff - 3 * p.crouch + 6 * p.arch, p.rump - 0.08 * p.crouch * (1 - p.leap) + p.pitch), { shade: true });
+    if (p.arch) add(C.fur, ell(bx - 4, by - 18 * p.arch, 32, 18), { shade: true });
+    add(C.fur, leg(bx - 22 - p.stretch * 0.5, hy + 10, hind(0), planted(hy + 10, hind(0), len - 2 - hdy), 7));
+    const sx0 = bx + 32 + p.stretch * 0.5, sy0 = fy + 10;
+    if (p.pawLift) {
+      // A bent foreleg: upper leg swung forward, paw hanging from the wrist.
+      const a1 = front(Math.PI) + 1.3 * p.pawLift, kx = sx0 + 20 * Math.sin(a1), ky = sy0 + 20 * Math.cos(a1);
+      const a2 = a1 - 1.7 * p.pawLift * p.pawCurl;
+      add(C.fur, capsule(sx0, sy0, kx, ky, 7));
+      add(C.fur, capsule(kx, ky, kx + 15 * Math.sin(a2), ky + 15 * Math.cos(a2), 6.5));
+    } else {
+      add(C.fur, leg(sx0, sy0, front(Math.PI), planted(sy0, front(Math.PI), len - 2 - fdy), 7));
+    }
+    head = { x: bx + 48 + p.stretch * 0.5 + 6 * p.crouch + p.neck, y: by - 38 + p.headDY + 8 * p.crouch + 1.3 * fdy };
+    if (p.neck) add(C.fur, capsule(bx + 30, by - 8 + fdy, head.x - 8, head.y + 12, 16));
   } else {
     const lx = p.lean;
     add(C.fur, c => {
       c.moveTo(78, 176);
       c.bezierCurveTo(52, 184, 30, 180, 26 + 5 * p.tail, 160 - 12 * Math.abs(p.tail));
     }, { stroke: 11 });
-    add(C.furFar, capsule(116 + lx, 140, 118 + lx, 180, 6.5));
+    if (p.farPaw) add(C.furFar, capsule(116 + lx, 140, p.farPaw[0], p.farPaw[1], 6.5));
+    else add(C.furFar, capsule(116 + lx, 140, 118 + lx, 180 - p.kn[1], 6.5));
     add(C.fur, ell(84, 162, 30, 21), { shade: true });
     add(C.fur, ell(104 + lx * 0.6, 136, 30, 37, -0.22), { shade: true });
+    if (p.gulpY) add(C.fur, ell(136 + lx - 0.12 * (p.gulpY - 108), p.gulpY, 7, 6), { shade: true });
     if (p.groom) {
       const py = 106 + p.paw;
       add(C.fur, capsule(126 + lx, 142, 150, py, 7));
+    } else if (p.sitPaw) {
+      add(C.fur, capsule(126 + lx, 142, p.sitPaw[0], p.sitPaw[1], 7));
     } else {
-      add(C.fur, capsule(130 + lx, 142, 131 + lx, 181, 7));
+      add(C.fur, capsule(130 + lx, 142, 131 + lx, 181 - p.kn[0], 7));
     }
-    head = { x: 128 + lx, y: 84 + p.headDY };
+    if (p.earScratch) {
+      // Hind leg up behind the head, the foot thumping at the ear.
+      const fy = 66 + 5 * p.thump;
+      ontop(C.fur, capsule(80, 166, 64, 128, 9));
+      ontop(C.fur, capsule(64, 128, 98, fy, 6.5));
+      ontop(C.fur, ell(100, fy - 2, 8, 7, -0.6));
+    }
+    head = { x: 128 + lx + p.neck, y: 84 + p.headDY };
   }
   const hx = head.x, hy = head.y, tilt = p.tilt;
   const rot = (dx, dy) => [hx + dx * Math.cos(tilt) - dy * Math.sin(tilt), hy + dx * Math.sin(tilt) + dy * Math.cos(tilt)];
@@ -197,9 +590,9 @@ function drawCat(ctx, p) {
   add(C.fur, ear(-1.05, -1.1));
   add(C.fur, ell(hx, hy, 34, 30, tilt), { shade: true });
 
-  // Outline, then fills.
-  for (const pass of ['rim', 'fill']) {
-    for (const part of parts) {
+  // Outline, then fills; parts in front of the head get their own outline.
+  for (const layer of [parts, over]) for (const pass of ['rim', 'fill']) {
+    for (const part of layer) {
       ctx.beginPath();
       part.path(ctx);
       if (part.stroke) {
@@ -231,10 +624,17 @@ function drawCat(ctx, p) {
     ctx.arc(cx, cy + 3, 7, 0, TAU); ctx.fill(); ctx.restore();
   }
 
+  // Face features slide round the head as it turns: `look` 1 is profile,
+  // 0 faces the viewer, -1 looks back over the shoulder.
+  const lk = p.look;
+  const turn = (right, front, back) => lk >= 0 ? front + (right - front) * lk : front + (back - front) * -lk;
+  const big = p.eyeBig;
+
   // Eyes: big and pale so they glint even when dimmed.
   const eye = (dx, dy, rx, ry) => {
     const [ex, ey] = rot(dx, dy);
     const open = 1 - p.blink;
+    rx *= big; ry *= big;
     if (open < 0.15) {
       ctx.strokeStyle = C.rim; ctx.lineWidth = 2; ctx.beginPath();
       ctx.moveTo(ex - rx, ey + 1); ctx.quadraticCurveTo(ex, ey + 4, ex + rx, ey + 1); ctx.stroke();
@@ -244,36 +644,51 @@ function drawCat(ctx, p) {
     ctx.beginPath(); ctx.ellipse(ex, ey, rx, ry * open, tilt, 0, TAU);
     ctx.fillStyle = C.eye; ctx.fill(); ctx.clip();
     ctx.fillStyle = '#e9a64a'; ctx.beginPath(); ctx.ellipse(ex, ey + ry * 0.55, rx * 1.2, ry * 0.6, tilt, 0, TAU); ctx.fill();
-    ctx.fillStyle = C.pupil; ctx.beginPath(); ctx.ellipse(ex + 1.5, ey, p.pupil, ry * 0.85, tilt, 0, TAU); ctx.fill();
+    ctx.fillStyle = C.pupil; ctx.beginPath(); ctx.ellipse(ex + 1.5 * lk + p.gaze[0], ey + p.gaze[1], p.pupil, ry * 0.85, tilt, 0, TAU); ctx.fill();
     ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(ex - rx * 0.35, ey - ry * 0.4 * open, 2.4, 0, TAU); ctx.fill();
     ctx.restore();
     ctx.strokeStyle = '#0b0a12'; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.ellipse(ex, ey, rx, ry * open, tilt, 0, TAU); ctx.stroke();
   };
-  eye(-5, -3, 7, 10);
-  eye(15, -2, 8.5, 11);
+  eye(turn(-5, -12, -15), turn(-3, -2, -2), turn(7, 8.5, 8.5), turn(10, 11, 11));
+  eye(turn(15, 12, 5), -2, turn(8.5, 8.5, 7), turn(11, 11, 10));
 
   // Nose, mouth, whiskers
-  const [nx, ny] = rot(27, 6);
+  const [nx, ny] = rot(turn(27, 0, -27), 6 + p.noseTw);
   ctx.fillStyle = C.nose; ctx.beginPath(); ctx.moveTo(nx - 3, ny - 1); ctx.lineTo(nx + 3, ny - 1); ctx.lineTo(nx, ny + 3); ctx.fill();
-  const [mx, my] = rot(24, 15);
+  const [mx, my] = rot(turn(24, 0, -24), 15);
   if (p.mouth > 0.02) {
     ctx.fillStyle = C.mouth; ctx.strokeStyle = C.rim; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.ellipse(mx, my, 3 + 6 * p.mouth, 1 + 7 * p.mouth, tilt, 0, TAU); ctx.fill(); ctx.stroke();
+    if (p.fangs) {
+      // Fangs.
+      ctx.fillStyle = '#e8ecf8';
+      for (const s of [-1, 1]) {
+        const [fx, fy] = rot(turn(24, 0, -24) + s * 3.5 * p.mouth, 15 - 6 * p.mouth);
+        ctx.beginPath(); ctx.moveTo(fx - 2, fy); ctx.lineTo(fx + 2, fy); ctx.lineTo(fx, fy + 5); ctx.fill();
+      }
+    }
   } else {
     ctx.strokeStyle = C.rim; ctx.lineWidth = 1.3; ctx.beginPath();
     ctx.moveTo(mx - 5, my - 2); ctx.quadraticCurveTo(mx - 2, my + 2, mx, my - 1); ctx.quadraticCurveTo(mx + 2, my + 2, mx + 5, my - 2); ctx.stroke();
   }
   if (p.lick > 0.02) {
-    ctx.fillStyle = C.tongue; ctx.beginPath(); ctx.ellipse(mx + 2, my + 2, 3 * p.lick + 1, 2.5 * p.lick, 0.3, 0, TAU); ctx.fill();
+    ctx.fillStyle = C.tongue; ctx.beginPath(); ctx.ellipse(mx + 2 * lk + p.tongue, my + 2 + 0.3 * Math.abs(p.tongue), 3 * p.lick + 1, 2.5 * p.lick, 0.3, 0, TAU); ctx.fill();
   }
   ctx.strokeStyle = 'rgba(140,157,204,0.55)'; ctx.lineWidth = 1;
-  for (const k of [-1, 0, 1]) {
-    const [wx, wy] = rot(20, 10 + k * 2);
-    ctx.beginPath(); ctx.moveTo(wx, wy); ctx.quadraticCurveTo(wx + 14, wy + k * 3 - 2, wx + 28, wy + k * 6); ctx.stroke();
+  for (const side of [1, -1]) {
+    const shown = side > 0 ? Math.min(1, 1 + lk) : Math.min(1, 1 - lk);
+    if (shown < 0.05) continue;
+    ctx.globalAlpha = shown;
+    const x0 = side > 0 ? turn(20, 10, 10) : turn(-10, -10, -20);
+    for (const k of [-1, 0, 1]) {
+      const [wx, wy] = rot(x0, 10 + k * 2);
+      ctx.beginPath(); ctx.moveTo(wx, wy); ctx.quadraticCurveTo(wx + side * 14, wy + k * 3 - 2, wx + side * 28, wy + k * 6); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
   }
 
-  if (p.upright) {
+  if (p.upright && p.claws) {
     ctx.strokeStyle = 'rgba(200, 210, 240, 0.8)'; ctx.lineWidth = 1.2;
     for (const y of [p.clawNear, p.clawFar]) {
       for (let k = -1; k <= 1; k++) {
@@ -281,8 +696,53 @@ function drawCat(ctx, p) {
       }
     }
   }
-  const tip = p.ext > 0.01 ? drawTentacles(ctx, mx, my, p) : null;
-  return { mouth: [mx, my], tip };
+  drawEffects(ctx, p, mx, my, nx, ny, hx, hy);
+  let tip = p.ext > 0.01 ? drawTentacles(ctx, mx, my, p) : null;
+  // Report positions in frame coordinates, past the whole-cat moves above.
+  const m = base.inverse().multiply(ctx.getTransform());
+  ctx.restore();
+  const map = ([x, y]) => { const q = m.transformPoint(new DOMPoint(x, y)); return [q.x, q.y]; };
+  return { mouth: map([mx, my]), tip: tip && map(tip) };
+}
+
+// Small extras: skid dust, a burp's glow, sneeze mist, nap z's, purr rumbles.
+function drawEffects(ctx, p, mx, my, nx, ny, hx, hy) {
+  if (p.dust > 0.02) {
+    ctx.fillStyle = `rgba(140, 157, 204, ${0.35 * p.dust})`;
+    for (const [dx, r] of [[70, 6], [84, 4], [60, 3.5], [-40, 5], [-52, 3]]) {
+      ctx.beginPath(); ctx.arc(100 + dx + 8 * (1 - p.dust), 182 - 4 * (1 - p.dust), r * (1.4 - 0.4 * p.dust), 0, TAU); ctx.fill();
+    }
+  }
+  if (p.glow > 0.02 && p.glow < 0.99) {
+    const g = p.glow, x = mx + 10 + 26 * g, y = my - 4 - 14 * g, r = 5 + 12 * g;
+    const gr = ctx.createRadialGradient(x, y, 0, x, y, r);
+    gr.addColorStop(0, `rgba(190, 255, 170, ${0.7 * (1 - g)})`);
+    gr.addColorStop(1, 'rgba(120, 220, 140, 0)');
+    ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+  }
+  if (p.mist > 0.02) {
+    ctx.fillStyle = `rgba(200, 215, 245, ${0.6 * (1 - p.mist)})`;
+    for (let k = 0; k < 7; k++) {
+      const a = -0.5 + k * 0.17, d = 8 + 34 * p.mist * (0.7 + 0.3 * ((k * 5) % 3));
+      ctx.beginPath(); ctx.arc(nx + d * Math.cos(a), ny + 6 + d * Math.sin(a), 1.6, 0, TAU); ctx.fill();
+    }
+  }
+  if (p.zz >= 0) {
+    ctx.fillStyle = C.rim; ctx.textAlign = 'center';
+    for (let k = 0; k < 3; k++) {
+      const f = (p.zz + k / 3) % 1;
+      ctx.globalAlpha = Math.sin(Math.PI * f) * 0.9;
+      ctx.font = `bold ${10 + 8 * f}px sans-serif`;
+      ctx.fillText('z', hx + 20 + 30 * f + 6 * Math.sin(f * TAU), hy - 36 - 70 * f);
+    }
+    ctx.globalAlpha = 1;
+  }
+  if (p.purr >= 0) {
+    ctx.strokeStyle = 'rgba(140, 157, 204, 0.5)'; ctx.lineWidth = 1.3;
+    for (const k of [0, 1]) {
+      ctx.beginPath(); ctx.arc(hx + 30, hy + 30, 10 + 7 * k + 3 * p.purr, -0.5, 0.5); ctx.stroke();
+    }
+  }
 }
 
 // The secret: tentacles uncurl from the mouth and feel their way forward.
@@ -293,7 +753,8 @@ function drawTentacles(ctx, mx, my, p) {
   for (let k = 0; k < 4; k++) {
     const len = (100 + 18 * ((k * 7) % 3)) * p.ext;
     const seg = len / N;
-    let ang = -0.55 + k * 0.33, x = mx, y = my;
+    // Flared, they fan out wide.
+    let ang = (-0.55 + k * 0.33) * (1 + p.flare) - 0.2 * p.flare, x = mx, y = my;
     const pts = [[x, y]];
     for (let i = 1; i <= N; i++) {
       const f = i / N;
@@ -369,7 +830,23 @@ function bake() {
     meta.push(drawFrame(a, name, i, n)); a.restore();
   });
   document.getElementById('meta').textContent = JSON.stringify({ clips: CLIPS, frames: meta, consts: { SCRATCH_X } });
-  document.getElementById('out').textContent = atlas.toDataURL('image/png');
+  // Each frame trimmed to what's drawn, as its own PNG: the agent decodes
+  // frames one at a time as they're shown.
+  const cut = document.createElement('canvas');
+  const px = a.getImageData(0, 0, atlas.width, atlas.height).data;
+  document.getElementById('out').textContent = all.map((f, k) => {
+    const ox = (k % COLS) * W, oy = Math.floor(k / COLS) * H;
+    let x0 = W, y0 = H, x1 = -1, y1 = -1;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (px[((oy + y) * atlas.width + ox + x) * 4 + 3]) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+    }
+    if (x1 < 0) { x0 = y0 = 0; x1 = y1 = 0; }
+    cut.width = x1 - x0 + 1; cut.height = y1 - y0 + 1;
+    const c = cut.getContext('2d');
+    c.clearRect(0, 0, cut.width, cut.height);
+    c.drawImage(atlas, ox + x0, oy + y0, cut.width, cut.height, 0, 0, cut.width, cut.height);
+    return `${x0} ${y0} ${cut.toDataURL('image/png').split(',')[1]}`;
+  }).join('\n');
   const sheet = document.createElement('canvas');
   sheet.width = atlas.width / 2; sheet.height = atlas.height / 2;
   const s = sheet.getContext('2d');
@@ -382,12 +859,20 @@ function bake() {
 
 function preview() {
   const box = document.getElementById('clips');
-  const views = CLIPS.map(([name, n]) => {
-    const d = document.createElement('div'); d.className = 'clip';
-    const c = document.createElement('canvas'); c.width = W; c.height = H;
-    d.append(c, document.createElement('br'), name); box.append(d);
-    return { name, n, ctx: c.getContext('2d'), c };
-  });
+  const count = Object.fromEntries([...CLIPS, ...DRAFTS]);
+  const draft = new Set(DRAFTS.map(([name]) => name));
+  const views = [];
+  for (const [title, names] of GROUPS) {
+    const h = document.createElement('h2'); h.textContent = title; box.append(h);
+    for (const name of names) {
+      const d = document.createElement('div'); d.className = 'clip';
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
+      const label = document.createElement('span'); label.textContent = draft.has(name) ? `${name} (new)` : name;
+      if (draft.has(name)) label.className = 'draft';
+      d.append(c, document.createElement('br'), label); box.append(d);
+      views.push({ name, n: count[name], ctx: c.getContext('2d'), c });
+    }
+  }
   let f = 0;
   setInterval(() => {
     const dim = document.getElementById('dim').checked;

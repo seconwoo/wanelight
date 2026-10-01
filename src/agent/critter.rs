@@ -15,10 +15,9 @@ use super::capture::{CELL, GridGeom};
 use super::cat_frames as cf;
 use crate::{log, util};
 
-/// Sprite frame size (px) and atlas columns.
+/// Sprite frame size (px).
 pub const FRAME_W: u32 = 288;
 pub const FRAME_H: u32 = 192;
-pub const COLS: usize = 16;
 /// Feet position inside a frame (px). Frames face right.
 pub const ANCHOR: (f32, f32) = (100.0, 184.0);
 /// Firefly frames: a FLY x FLY square at FLY_AT inside their cell.
@@ -172,7 +171,7 @@ enum State {
     ToScratch,
     Scratch,
     Startle,
-    /// Running off screen.
+    /// Running into the shadows, or off screen.
     Flee,
     /// Walking off screen at the end of a visit.
     Leave,
@@ -372,6 +371,11 @@ pub struct Critter {
     /// Reaches into the light this visit to the rim, and when the light is interesting again.
     reaches: u32,
     rim_after: f64,
+    /// The cat heads off after this many seconds.
+    visit: f64,
+    /// Startled again this soon after the last time, it bolts off screen.
+    startled: f64,
+    bolt: bool,
     done: bool,
 }
 
@@ -385,8 +389,8 @@ const BRAKE: f32 = 520.0;
 const POUNCE_SECS: f64 = 0.55;
 /// Horizontal distance of a pounce (px at scale 1).
 const POUNCE_REACH: f32 = 150.0;
-const VISIT_SECS: f64 = 120.0;
-const MAX_SECS: f64 = 200.0;
+/// A visit ends this long after it was meant to, however busy the cat is.
+const OVERTIME_SECS: f64 = 80.0;
 /// How far the cat can leap between windows (px at scale 1).
 const LEAP_UP: f32 = 450.0;
 const LEAP_ACROSS: f32 = 700.0;
@@ -398,7 +402,7 @@ const FLIES_PER_VISIT: usize = 4;
 
 impl Critter {
     /// Walks in from the side farther from the pointer, if that side is dark.
-    pub fn enter(now: f64, env: &Env, seed: u64) -> Option<Critter> {
+    pub fn enter(now: f64, env: &Env, seed: u64, visit: f64) -> Option<Critter> {
         let m = env.mon;
         let scale = ((m.bottom - m.top) as f32 / 1440.0).clamp(0.5, 2.0);
         let mut c = Critter {
@@ -439,6 +443,9 @@ impl Critter {
             ledge_checked: now,
             reaches: 0,
             rim_after: now,
+            visit,
+            startled: f64::NEG_INFINITY,
+            bolt: false,
             done: false,
         };
         let from_left = env.pointer.0 > (m.left + m.right) as f32 / 2.0;
@@ -570,6 +577,36 @@ impl Critter {
         let m = env.mon;
         let x = if self.pos.0 < away_from { m.left as f32 - 200.0 * self.scale } else { m.right as f32 + 200.0 * self.scale };
         (x, self.pos.1)
+    }
+
+    /// Where to run when startled: a dark spot well away from the pointer,
+    /// with a dark path to it. Off screen if there's none, or if it was
+    /// startled again soon after the last time.
+    fn flee_goal(&mut self, env: &Env) -> (f32, f32) {
+        let (px, py) = env.pointer;
+        if self.bolt {
+            return self.exit_goal(env, px);
+        }
+        let (m, s) = (env.mon, self.scale);
+        let from = (self.pos.0 - px).hypot(self.pos.1 - py);
+        let mut best: Option<((f32, f32), f32)> = None;
+        for _ in 0..24 {
+            let x = m.left as f32 + (m.right - m.left) as f32 * self.unit();
+            let y = m.top as f32 + (m.bottom - m.top) as f32 * self.unit();
+            let g = self.feet_bounds(env, (x, y));
+            let d = (g.0 - px).hypot(g.1 - py);
+            if d < (500.0 * s).max(from) || best.is_some_and(|(_, b)| d <= b) || !env.dark_to(g.0, g.1 - 60.0 * s, 0.9) {
+                continue;
+            }
+            let clear = (1..=6).all(|k| {
+                let f = k as f32 / 6.0;
+                env.dark(self.pos.0 + (g.0 - self.pos.0) * f, self.pos.1 + (g.1 - self.pos.1) * f - 60.0 * s)
+            });
+            if clear {
+                best = Some((g, d));
+            }
+        }
+        best.map_or_else(|| self.exit_goal(env, px), |(g, _)| g)
     }
 
     /// Walkable top edges of windows: the stretch of each top edge that isn't
@@ -966,10 +1003,12 @@ impl Critter {
                     self.prey = None;
                 }
                 self.v = 0.0;
+                self.bolt = now - self.startled < 20.0;
+                self.startled = now;
                 self.set(State::Startle, now, Clip::Startle.secs());
             }
         }
-        if now - self.born > MAX_SECS {
+        if now - self.born > self.visit + OVERTIME_SECS {
             self.done = true;
             return None;
         }
@@ -1009,7 +1048,7 @@ impl Critter {
                 self.v = 0.0;
                 let fly = now >= self.hunt_after && self.nearest_fly(1200.0 * s).is_some();
                 let rim = resting && !windows_only() && now >= self.rim_after && self.rim_seat(env).is_some();
-                if fly || rim || now - self.born > VISIT_SECS {
+                if fly || rim || now - self.born > self.visit {
                     // Hop down to hunt, visit the light or leave.
                     let to = self.floor_below(env);
                     self.jump_to(now, to, Ground::Floor, State::Idle);
@@ -1034,7 +1073,7 @@ impl Critter {
             State::Idle => {
                 self.v = 0.0;
                 let fly = if now >= self.hunt_after { self.nearest_fly(1200.0 * s) } else { None };
-                if now - self.born > VISIT_SECS {
+                if now - self.born > self.visit {
                     self.goal = self.exit_goal(env, px);
                     self.set(State::Leave, now, 0.0);
                 } else if let Some(f) = fly {
@@ -1100,7 +1139,7 @@ impl Critter {
                     self.ground = j.land;
                     match j.then {
                         State::Flee => {
-                            self.goal = self.exit_goal(env, px);
+                            self.goal = self.flee_goal(env);
                             self.set(State::Flee, now, 0.0);
                         }
                         then => {
@@ -1330,7 +1369,7 @@ impl Critter {
                 self.scratch = None;
                 if now >= self.until {
                     if self.ground == Ground::Floor {
-                        self.goal = self.exit_goal(env, px);
+                        self.goal = self.flee_goal(env);
                         self.set(State::Flee, now, 0.0);
                     } else {
                         let to = self.floor_below(env);
@@ -1342,7 +1381,14 @@ impl Critter {
                 let run = self.state == State::Flee;
                 let arrived = self.drive(dt, if run { RUN } else { WALK });
                 self.gait(now);
-                if arrived {
+                let hid = self.pos.0 > env.mon.left as f32 && self.pos.0 < env.mon.right as f32;
+                if arrived && run && hid {
+                    // Safe in the shadows: it crouches, and keeps away from the light for a while.
+                    self.rim_after = now + 10.0 + 10.0 * self.unit() as f64;
+                    self.hunt_after = self.hunt_after.max(now + 3.0);
+                    self.set_random(State::Idle, now, 3.0, 4.0);
+                    self.play(Clip::Sit, now);
+                } else if arrived {
                     self.done = true;
                     return None;
                 }

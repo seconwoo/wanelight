@@ -1063,6 +1063,7 @@ impl Agent {
             self.spook = want.then(|| spook::Spook::new(now));
         }
         let Some(k) = self.spook.as_mut() else { return };
+        k.set_stay(self.cfg.torch.spooky_stay, now);
         if blocked {
             k.cancel(now);
             return;

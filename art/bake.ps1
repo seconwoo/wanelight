@@ -1,5 +1,7 @@
-# Bakes the spooky-mode cat (art/cat/cat.html) into assets/cat.png with
+# Bakes the spooky-mode cat (art/cat/cat.html) into assets/cat.bin with
 # headless Edge, plus a labelled contact sheet at art/cat/sheet.png for review.
+# cat.bin holds every frame trimmed to what's drawn, as its own PNG, so the
+# agent can decode frames one at a time instead of holding a whole sheet.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $edge = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") |
@@ -9,17 +11,29 @@ $page = 'file:///' + ((Join-Path $PSScriptRoot 'cat\cat.html') -replace '\\', '/
 $profile = Join-Path $env:TEMP 'wanelight-bake'
 $dom = & $edge --headless --disable-gpu --user-data-dir="$profile" --dump-dom $page 2>$null | Out-String
 
-function Save-DataUrl($id, $path) {
-    if ($dom -notmatch "<pre id=`"$id`"[^>]*>data:image/png;base64,([A-Za-z0-9+/=]+)</pre>") { throw "no $id in page output" }
-    [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($Matches[1]))
-    Write-Output ("{0} ({1:N0} bytes)" -f $path, (Get-Item $path).Length)
+if ($dom -notmatch '<pre id="sheet"[^>]*>data:image/png;base64,([A-Za-z0-9+/=]+)</pre>') { throw 'no sheet in page output' }
+$sheet = Join-Path $PSScriptRoot 'cat\sheet.png'
+[IO.File]::WriteAllBytes($sheet, [Convert]::FromBase64String($Matches[1]))
+Write-Output ("{0} ({1:N0} bytes)" -f $sheet, (Get-Item $sheet).Length)
+
+# Frames: "x y base64png" per line, x and y where the trimmed image sits in the frame.
+if ($dom -notmatch '<pre id="out"[^>]*>([^<]+)</pre>') { throw 'no frames in page output' }
+$bin = [IO.MemoryStream]::new()
+$index = foreach ($line in ($Matches[1].Trim() -split "`n")) {
+    $x, $y, $b64 = $line.Trim() -split ' '
+    $png = [Convert]::FromBase64String($b64)
+    $at = $bin.Length
+    $bin.Write($png, 0, $png.Length)
+    '    ({0}, {1}, {2}, {3}),' -f $x, $y, $at, $png.Length
 }
 New-Item -ItemType Directory -Force (Join-Path $root 'assets') | Out-Null
-Save-DataUrl 'out' (Join-Path $root 'assets\cat.png')
-Save-DataUrl 'sheet' (Join-Path $PSScriptRoot 'cat\sheet.png')
+$binPath = Join-Path $root 'assets\cat.bin'
+[IO.File]::WriteAllBytes($binPath, $bin.ToArray())
+Write-Output ("{0} ({1:N0} bytes)" -f $binPath, $bin.Length)
 
-# Frame metadata for the agent: clip ranges, and where the mouth and the
-# grabbing tentacle's tip are in each frame, so prey lines up with the sprite.
+# Frame metadata for the agent: clip ranges, where each frame's PNG is, and
+# where the mouth and the grabbing tentacle's tip are in each frame, so prey
+# lines up with the sprite.
 if ($dom -notmatch '<pre id="meta"[^>]*>([^<]+)</pre>') { throw 'no meta in page output' }
 $meta = [Net.WebUtility]::HtmlDecode($Matches[1]) | ConvertFrom-Json
 $f = [Globalization.CultureInfo]::InvariantCulture
@@ -34,7 +48,12 @@ foreach ($c in $meta.consts.PSObject.Properties) {
     $lines += "pub const $($c.Name): f32 = $(([double]$c.Value).ToString('0.0', $f));"
 }
 $n = $meta.frames.Count
-$lines += '', '/// Mouth position in each frame (px, facing right).'
+if ($index.Count -ne $n) { throw "frame count mismatch: $($index.Count) images, $n frames" }
+$lines += '', '/// Each frame in assets/cat.bin: where its trimmed image sits in the frame (px),'
+$lines += '/// and the byte offset and length of its PNG.'
+$lines += "pub const SPRITES: [(u16, u16, u32, u32); $n] = ["
+$lines += $index
+$lines += '];', '', '/// Mouth position in each frame (px, facing right).'
 $lines += "pub const MOUTH: [(f32, f32); $n] = ["
 $lines += ($meta.frames | ForEach-Object { '    ' + (& $pt $_.mouth) + ',' })
 $lines += '];', '', '/// Tip of the grabbing tentacle in each frame (px); (0, 0) when the tentacles are in.'
